@@ -1,6 +1,21 @@
 #!/bin/bash
 # copyright-check.sh — Debian copyright file generator, checker, and reviewer
 #
+# Copyright (C) 2026 Erich Eickmeyer
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 # Uses ScanCode Toolkit (SPDX license database) when available for high-
 # accuracy detection, falling back to licensecheck otherwise. Can generate
 # a new debian/copyright, check an existing one, or produce a reviewer report.
@@ -19,6 +34,7 @@
 #   -f, --fix               Interactively fix issues found (check mode only)
 #   --yes                   Auto-accept all fixes (use with --fix, no prompts)
 #   -v, --verbose           Show all mismatches including likely false positives
+#   --no-fetch              Don't download license text from SPDX/CC (use FIXME stubs)
 #   -j, --jobs N            Parallel scancode workers (default: nproc)
 #   -h, --help              Show this help
 #
@@ -39,6 +55,7 @@ OUTPUT=""
 VERBOSE=false
 FIX_MODE=false
 YES_MODE=false
+NO_FETCH=false
 JOBS=""
 SRCDIR=""
 
@@ -52,8 +69,10 @@ while [[ $# -gt 0 ]]; do
         check|generate|review)
             MODE="$1"; shift ;;
         -e|--exclude)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
             EXCLUDE_PATTERNS+=("$2"); shift 2 ;;
         -o|--output)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
             OUTPUT="$2"; shift 2 ;;
         -f|--fix)
             FIX_MODE=true; shift ;;
@@ -61,7 +80,10 @@ while [[ $# -gt 0 ]]; do
             YES_MODE=true; shift ;;
         -v|--verbose)
             VERBOSE=true; shift ;;
+        --no-fetch)
+            NO_FETCH=true; shift ;;
         -j|--jobs)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
             JOBS="$2"; shift 2 ;;
         -h|--help)
             show_help ;;
@@ -105,8 +127,15 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+_WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$_WORKDIR"' EXIT
+
+# ── Default exclusions for VCS / build artifacts ─────────────────────
+DEFAULT_EXCLUDES=(".git/*" ".svn/*" ".hg/*" "node_modules/*" "__pycache__/*"
+    ".tox/*" "*.pyc" ".eggs/*" "*.egg-info/*" "_build/*" "build/*")
+for _pat in "${DEFAULT_EXCLUDES[@]}"; do
+    EXCLUDE_PATTERNS+=("$_pat")
+done
 
 echo "=== Debian Copyright Tool ===" >&2
 echo "Mode:    $MODE" >&2
@@ -123,24 +152,34 @@ cd "$SRCDIR"
 
 if [[ "$SCANNER" == "scancode" ]]; then
     echo "Running ScanCode (SPDX database)... this may take several minutes." >&2
-    SC_ARGS=(--license --copyright --json "$TMPDIR/scancode.json" --quiet)
+    SC_ARGS=(--license --copyright --json "$_WORKDIR/scancode.json" --quiet)
     if [[ -n "$JOBS" ]]; then
         SC_ARGS+=(-n "$JOBS")
     fi
-    scancode "${SC_ARGS[@]}" . 2>/dev/null
-    SCAN_FILE="$TMPDIR/scancode.json"
+    # Pass exclude patterns to scancode for early filtering
+    for _pat in "${EXCLUDE_PATTERNS[@]}"; do
+        SC_ARGS+=(--ignore "$_pat")
+    done
+    if ! scancode "${SC_ARGS[@]}" . 2>"$_WORKDIR/scancode.err"; then
+        echo "Warning: ScanCode exited with errors (see below). Results may be incomplete." >&2
+        head -20 "$_WORKDIR/scancode.err" >&2
+    fi
+    SCAN_FILE="$_WORKDIR/scancode.json"
 else
     echo "Running licensecheck..." >&2
-    licensecheck -r --deb-machine . 2>/dev/null \
+    if ! licensecheck -r --deb-machine . 2>"$_WORKDIR/licensecheck.err" \
         | sed 's/[\x00-\x08\x0e-\x1f]//g' \
-        > "$TMPDIR/licensecheck.txt"
-    SCAN_FILE="$TMPDIR/licensecheck.txt"
+        > "$_WORKDIR/licensecheck.txt"; then
+        echo "Warning: licensecheck exited with errors. Results may be incomplete." >&2
+        head -20 "$_WORKDIR/licensecheck.err" >&2
+    fi
+    SCAN_FILE="$_WORKDIR/licensecheck.txt"
 
     # Also run decopy if available and in check/review mode
     if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1; then
         echo "Running decopy..." >&2
         decopy --mode full --copyright-file "$COPYRIGHT_FILE" --quiet . \
-            > "$TMPDIR/decopy.txt" 2>&1 || true
+            > "$_WORKDIR/decopy.txt" 2>&1 || true
     fi
 fi
 
@@ -148,13 +187,16 @@ echo "Analyzing..." >&2
 echo "" >&2
 
 # ── Pass state to Python ─────────────────────────────────────────────
+# ── Resolve symlinks flag for Python ──────────────────────────────────
 EXCLUDE_STR="$(printf '%s\n' "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}")"
-export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE SCANNER MODE COPYRIGHT_FILE OUTPUT
+export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FILE OUTPUT
 
 python3 - "$SCAN_FILE" << 'PYEOF'
 import json, os, re, sys, fnmatch, textwrap
 from collections import defaultdict, OrderedDict
 from pathlib import Path
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 scan_file = sys.argv[1]
 scanner = os.environ.get("SCANNER", "licensecheck")
@@ -164,6 +206,94 @@ output_file = os.environ.get("OUTPUT", "")
 verbose = os.environ.get("VERBOSE", "false") == "true"
 fix_mode = os.environ.get("FIX_MODE", "false") == "true"
 yes_mode = os.environ.get("YES_MODE", "false") == "true"
+no_fetch = os.environ.get("NO_FETCH", "false") == "true"
+
+# ══════════════════════════════════════════════════════════════════════
+# License text fetcher — downloads from SPDX or Creative Commons
+# ══════════════════════════════════════════════════════════════════════
+_license_text_cache = {}
+
+def fetch_license_text(license_id):
+    """Fetch full license text from SPDX or Creative Commons.
+
+    Returns the license text as a string, or None if unavailable.
+    Results are cached so each license is fetched at most once.
+    """
+    if no_fetch:
+        return None
+    if license_id in _license_text_cache:
+        return _license_text_cache[license_id]
+
+    text = None
+
+    # Try Creative Commons URL first for CC licenses
+    if license_id.upper().startswith("CC-") and license_id.upper() != "CC0-1.0":
+        text = _fetch_cc_text(license_id)
+
+    # Try SPDX for everything (including CC as fallback)
+    if text is None:
+        text = _fetch_spdx_text(license_id)
+
+    _license_text_cache[license_id] = text
+    return text
+
+def _fetch_cc_text(license_id):
+    """Fetch CC license text from creativecommons.org."""
+    tag = license_id.lower().replace("cc-", "").rsplit("-", 1)
+    variant = tag[0] if tag else license_id.lower()
+    version = tag[1] if len(tag) > 1 else "4.0"
+    url = f"https://creativecommons.org/licenses/{variant}/{version}/legalcode.txt"
+    return _fetch_url(url)
+
+# Reverse mapping from DEP-5 names back to SPDX identifiers for API lookups
+_DEP5_TO_SPDX = {
+    "Expat": "MIT",
+    "Artistic": "Artistic-1.0",
+    "GPL-1": "GPL-1.0-only", "GPL-1+": "GPL-1.0-or-later",
+    "GPL-2": "GPL-2.0-only", "GPL-2+": "GPL-2.0-or-later",
+    "GPL-3": "GPL-3.0-only", "GPL-3+": "GPL-3.0-or-later",
+    "LGPL-2": "LGPL-2.0-only", "LGPL-2+": "LGPL-2.0-or-later",
+    "LGPL-2.1": "LGPL-2.1-only", "LGPL-2.1+": "LGPL-2.1-or-later",
+    "LGPL-3": "LGPL-3.0-only", "LGPL-3+": "LGPL-3.0-or-later",
+    "AGPL-3": "AGPL-3.0-only", "AGPL-3+": "AGPL-3.0-or-later",
+    "GFDL": "GFDL-1.3-only",
+    "GFDL-1.1": "GFDL-1.1-only", "GFDL-1.1+": "GFDL-1.1-or-later",
+    "GFDL-1.2": "GFDL-1.2-only", "GFDL-1.2+": "GFDL-1.2-or-later",
+    "GFDL-1.3": "GFDL-1.3-only", "GFDL-1.3+": "GFDL-1.3-or-later",
+}
+
+def _fetch_spdx_text(license_id):
+    """Fetch license text from the SPDX license list API."""
+    # Map DEP-5 names back to SPDX identifiers for the API
+    spdx_id = _DEP5_TO_SPDX.get(license_id, license_id)
+    url = f"https://spdx.org/licenses/{spdx_id}.json"
+    body = _fetch_url(url)
+    if body is None:
+        return None
+    try:
+        data = json.loads(body)
+        return data.get("licenseText", None)
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+def _fetch_url(url, timeout=15):
+    """GET a URL and return the body text, or None on failure."""
+    try:
+        req = Request(url, headers={"User-Agent": "copyright-audit/1.0"})
+        with urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except (URLError, OSError, ValueError):
+        return None
+
+def format_license_body(text):
+    """Format fetched license text for DEP-5 (indent each line with a space)."""
+    lines = []
+    for line in text.splitlines():
+        if line.strip() == "":
+            lines.append(" .")
+        else:
+            lines.append(" " + line)
+    return "\n".join(lines)
 
 exclude_raw = os.environ.get("EXCLUDE_STR", "").strip()
 excludes = [p for p in exclude_raw.split("\n") if p]
@@ -176,28 +306,115 @@ def is_excluded(filepath):
 # SPDX license ID normalization (maps scanner output -> DEP-5 names)
 # ══════════════════════════════════════════════════════════════════════
 SPDX_TO_DEP5 = {
+    # MIT / Expat variants
     "mit": "Expat", "expat": "Expat", "x11": "Expat",
     "mit~old": "Expat", "mit-cmu": "Expat",
+    "mit-0": "MIT-0",
+    # BSD variants
     "bsd-3-clause": "BSD-3-Clause", "bsd-3-clause-no-nuclear-license": "BSD-3-Clause",
     "bsd-2-clause": "BSD-2-Clause", "bsd-2-clause-views": "BSD-2-Clause",
     "bsd-2-clause-freebsd": "BSD-2-Clause",
-    "apache-2.0": "Apache-2.0",
+    "0bsd": "0BSD", "bsd-1-clause": "BSD-1-Clause",
+    # Apache
+    "apache-2.0": "Apache-2.0", "apache-1.1": "Apache-1.1",
+    # GPL family
+    "gpl-1.0-only": "GPL-1", "gpl-1.0-or-later": "GPL-1+",
     "gpl-2.0-only": "GPL-2", "gpl-2.0-or-later": "GPL-2+",
     "gpl-2": "GPL-2", "gpl-2+": "GPL-2+",
     "gpl-3.0-only": "GPL-3", "gpl-3.0-or-later": "GPL-3+",
+    "gpl-3": "GPL-3", "gpl-3+": "GPL-3+",
+    # LGPL family
+    "lgpl-2.0-only": "LGPL-2", "lgpl-2.0-or-later": "LGPL-2+",
+    "lgpl-2": "LGPL-2", "lgpl-2+": "LGPL-2+",
     "lgpl-2.1-only": "LGPL-2.1", "lgpl-2.1-or-later": "LGPL-2.1+",
     "lgpl-2.1": "LGPL-2.1", "lgpl-2.1+": "LGPL-2.1+",
-    "mpl-2.0": "MPL-2.0",
+    "lgpl-3.0-only": "LGPL-3", "lgpl-3.0-or-later": "LGPL-3+",
+    "lgpl-3": "LGPL-3", "lgpl-3+": "LGPL-3+",
+    # AGPL
+    "agpl-3.0-only": "AGPL-3", "agpl-3.0-or-later": "AGPL-3+",
+    "agpl-3": "AGPL-3", "agpl-3+": "AGPL-3+",
+    # MPL
+    "mpl-1.1": "MPL-1.1", "mpl-2.0": "MPL-2.0",
+    # Creative Commons (all versions 1.0 through 4.0)
+    "cc0-1.0": "CC0-1.0", "cc-pddc": "CC-PDDC",
+    "cc-by-1.0": "CC-BY-1.0", "cc-by-2.0": "CC-BY-2.0",
+    "cc-by-2.5": "CC-BY-2.5", "cc-by-3.0": "CC-BY-3.0", "cc-by-4.0": "CC-BY-4.0",
+    "cc-by-sa-1.0": "CC-BY-SA-1.0", "cc-by-sa-2.0": "CC-BY-SA-2.0",
+    "cc-by-sa-2.5": "CC-BY-SA-2.5", "cc-by-sa-3.0": "CC-BY-SA-3.0", "cc-by-sa-4.0": "CC-BY-SA-4.0",
+    "cc-by-nc-1.0": "CC-BY-NC-1.0", "cc-by-nc-2.0": "CC-BY-NC-2.0",
+    "cc-by-nc-2.5": "CC-BY-NC-2.5", "cc-by-nc-3.0": "CC-BY-NC-3.0", "cc-by-nc-4.0": "CC-BY-NC-4.0",
+    "cc-by-nd-1.0": "CC-BY-ND-1.0", "cc-by-nd-2.0": "CC-BY-ND-2.0",
+    "cc-by-nd-2.5": "CC-BY-ND-2.5", "cc-by-nd-3.0": "CC-BY-ND-3.0", "cc-by-nd-4.0": "CC-BY-ND-4.0",
+    "cc-by-nc-sa-1.0": "CC-BY-NC-SA-1.0", "cc-by-nc-sa-2.0": "CC-BY-NC-SA-2.0",
+    "cc-by-nc-sa-2.5": "CC-BY-NC-SA-2.5", "cc-by-nc-sa-3.0": "CC-BY-NC-SA-3.0", "cc-by-nc-sa-4.0": "CC-BY-NC-SA-4.0",
+    "cc-by-nc-nd-1.0": "CC-BY-NC-ND-1.0", "cc-by-nc-nd-2.0": "CC-BY-NC-ND-2.0",
+    "cc-by-nc-nd-2.5": "CC-BY-NC-ND-2.5", "cc-by-nc-nd-3.0": "CC-BY-NC-ND-3.0", "cc-by-nc-nd-4.0": "CC-BY-NC-ND-4.0",
+    # GFDL family
+    "gfdl-1.1-only": "GFDL-1.1", "gfdl-1.1-or-later": "GFDL-1.1+",
+    "gfdl-1.1": "GFDL-1.1", "gfdl-1.1+": "GFDL-1.1+",
+    "gfdl-1.1-no-invariants-only": "GFDL-1.1", "gfdl-1.1-no-invariants-or-later": "GFDL-1.1+",
+    "gfdl-1.1-invariants-only": "GFDL-1.1", "gfdl-1.1-invariants-or-later": "GFDL-1.1+",
+    "gfdl-1.2-only": "GFDL-1.2", "gfdl-1.2-or-later": "GFDL-1.2+",
+    "gfdl-1.2": "GFDL-1.2", "gfdl-1.2+": "GFDL-1.2+",
+    "gfdl-1.2-no-invariants-only": "GFDL-1.2", "gfdl-1.2-no-invariants-or-later": "GFDL-1.2+",
+    "gfdl-1.2-invariants-only": "GFDL-1.2", "gfdl-1.2-invariants-or-later": "GFDL-1.2+",
+    "gfdl-1.3-only": "GFDL-1.3", "gfdl-1.3-or-later": "GFDL-1.3+",
+    "gfdl-1.3": "GFDL-1.3", "gfdl-1.3+": "GFDL-1.3+",
+    "gfdl-1.3-no-invariants-only": "GFDL-1.3", "gfdl-1.3-no-invariants-or-later": "GFDL-1.3+",
+    "gfdl-1.3-invariants-only": "GFDL-1.3", "gfdl-1.3-invariants-or-later": "GFDL-1.3+",
+    # EPL / Eclipse
+    "epl-1.0": "EPL-1.0", "epl-2.0": "EPL-2.0",
+    # CDDL
+    "cddl-1.0": "CDDL-1.0", "cddl-1.1": "CDDL-1.1",
+    # Other common licenses
     "isc": "ISC",
-    "cc-by-sa-4.0": "CC-BY-SA-4.0", "cc-by-sa-3.0": "CC-BY-SA-3.0",
     "zlib": "Zlib",
-    "ofl-1.1": "OFL-1.1",
+    "ofl-1.0": "OFL-1.0", "ofl-1.1": "OFL-1.1",
     "sgi-b-2.0": "SGI-B-2.0",
-    "hpnd-sell-variant": "HPND-sell-variant",
-    "bsl-1.0": "BSL-1.0",
+    "hpnd": "HPND", "hpnd-sell-variant": "HPND-sell-variant",
+    "bsl-1.0": "BSL-1.0", "busl-1.1": "BUSL-1.1",
     "unlicense": "Unlicense",
     "public-domain": "public-domain",
-    "fsfap": "FSFAP",
+    "fsfap": "FSFAP", "fsful": "FSFUL", "fsfullr": "FSFULLR",
+    "artistic-2.0": "Artistic-2.0", "artistic-1.0": "Artistic",
+    "clartistic": "ClArtistic",
+    "wtfpl": "WTFPL",
+    "curl": "curl",
+    "postgresql": "PostgreSQL",
+    "eupl-1.2": "EUPL-1.2", "eupl-1.1": "EUPL-1.1",
+    "cecill-2.1": "CeCILL-2.1", "cecill-b": "CeCILL-B", "cecill-c": "CeCILL-C",
+    "python-2.0": "Python-2.0",
+    "ruby": "Ruby",
+    "ncsa": "NCSA",
+    "unicode-dfs-2016": "Unicode-DFS-2016", "unicode-tou": "Unicode-TOU",
+    # Additional well-known licenses
+    "osl-3.0": "OSL-3.0", "osl-2.1": "OSL-2.1",
+    "afl-3.0": "AFL-3.0",
+    "qpl-1.0": "QPL-1.0",
+    "lppl-1.3c": "LPPL-1.3c", "lppl-1.3a": "LPPL-1.3a", "lppl-1.2": "LPPL-1.2",
+    "w3c": "W3C", "w3c-20150513": "W3C",
+    "ntp": "NTP",
+    "vim": "Vim",
+    "sleepycat": "Sleepycat",
+    "php-3.0": "PHP-3.0", "php-3.01": "PHP-3.01",
+    "apsl-2.0": "APSL-2.0", "apsl-1.1": "APSL-1.1", "apsl-1.0": "APSL-1.0",
+    "openssl": "OpenSSL",
+    "oldap-2.8": "OLDAP-2.8",
+    "ms-pl": "MS-PL", "ms-rl": "MS-RL",
+    "sendmail": "Sendmail", "sendmail-8.23": "Sendmail",
+    "libtiff": "libtiff",
+    "beerware": "Beerware",
+    "blessing": "blessing",
+    "json": "JSON",
+    "bsd-4-clause": "BSD-4-Clause",
+    "agpl-1.0-only": "AGPL-1", "agpl-1.0-or-later": "AGPL-1+",
+    "tcp-wrappers": "TCP-wrappers",
+    "latex2e": "Latex2e",
+    "sax-pd": "SAX-PD",
+    "rsa-md": "RSA-MD",
+    "ecl-2.0": "ECL-2.0",
+    "cal-1.0": "CAL-1.0", "cal-1.0-combined-work-exception": "CAL-1.0",
+    "mup": "MulanPSL-2.0", "mulanpsl-2.0": "MulanPSL-2.0",
 }
 
 def to_dep5(raw):
@@ -211,14 +428,25 @@ def to_dep5(raw):
         base += "+"
     return base
 
+# Canonical source-code file extensions (single definition used everywhere)
+SOURCE_EXTS = {
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx",
+    ".py", ".sh", ".pl", ".pm", ".rb",
+    ".java", ".js", ".ts", ".jsx", ".tsx",
+    ".rs", ".go", ".swift", ".m", ".mm",
+    ".cs", ".fs", ".vb",
+}
+
 def norm_cmp(lic):
     """Normalize for comparison only (lowercase, collapse variants)."""
     s = lic.lower().strip()
-    s = re.sub(r'\.0', '', s)
+    s = re.sub(r'\.0(?=$|[^0-9.])', '', s)
     s = s.replace("-or-later", "+").replace("-only", "")
     ALIASES = {
         "expat": "expat", "mit": "expat", "x11": "expat",
         "mit~old": "expat", "mit-cmu": "expat",
+        "artistic": "artistic", "artistic-1": "artistic",
+        "bsd": "bsd", "bsd-3-clause": "bsd-3-clause",
     }
     return ALIASES.get(s, s)
 
@@ -226,10 +454,14 @@ def norm_cmp(lic):
 # Parse scan results into unified format
 # ══════════════════════════════════════════════════════════════════════
 # Result: list of {"path": str, "licenses": [str], "copyrights": [str]}
+# Low-confidence detections (scancode score < 50) are tracked separately.
 scan_results = []
+low_confidence = []  # [(path, license, score)]
+
+MIN_CONFIDENCE = 50  # Minimum ScanCode match score to trust
 
 if scanner == "scancode":
-    with open(scan_file) as f:
+    with open(scan_file, encoding="utf-8") as f:
         data = json.load(f)
     for entry in data.get("files", []):
         if entry.get("type") != "file":
@@ -237,8 +469,22 @@ if scanner == "scancode":
         path = "./" + entry["path"].lstrip("./")
         if is_excluded(path):
             continue
+        # Skip symlinks
+        if entry.get("is_symlink", False):
+            continue
         lics = []
         for det in entry.get("license_detections", []):
+            # Filter by confidence score when available
+            score = det.get("detection_log", [None])
+            match_score = None
+            for match in det.get("matches", []):
+                s = match.get("score", 100)
+                if match_score is None or s < match_score:
+                    match_score = s
+            if match_score is not None and match_score < MIN_CONFIDENCE:
+                spdx = det.get("license_expression_spdx", "") or ""
+                low_confidence.append((path, spdx or det.get("license_expression", ""), match_score))
+                continue
             spdx = det.get("license_expression_spdx", "") or ""
             if spdx:
                 # Split compound expressions
@@ -248,7 +494,7 @@ if scanner == "scancode":
                         lics.append(part)
             else:
                 expr = det.get("license_expression", "") or ""
-                for part in re.split(r'\s+AND\s+|\s+OR\s+', expr):
+                for part in re.split(r'\s+AND\s+|\s+OR\s+', expr, flags=re.IGNORECASE):
                     part = part.strip("() ")
                     if part:
                         lics.append(part)
@@ -263,9 +509,9 @@ if scanner == "scancode":
         scan_results.append({"path": path, "licenses": lics, "copyrights": cops})
 else:
     # Parse licensecheck --deb-machine output
-    with open(scan_file) as f:
+    with open(scan_file, encoding="utf-8") as f:
         content = f.read()
-    SKIP_LIC = {"UNKNOWN", "FSFAP", "FSFULLR", "FSFUL"}
+    SKIP_LIC = {"UNKNOWN"}
     for para in content.split("\n\n"):
         para = para.strip()
         if not para.startswith("Files:"):
@@ -304,12 +550,15 @@ else:
             cops = [cop_line] if cop_line else []
             scan_results.append({"path": fp, "licenses": lics, "copyrights": cops})
 
+# Skip symlinks in licensecheck results too
+scan_results = [r for r in scan_results if not os.path.islink(r["path"].lstrip("./"))]
+
 # ══════════════════════════════════════════════════════════════════════
 # Parse existing debian/copyright
 # ══════════════════════════════════════════════════════════════════════
 stanzas = []  # [(glob, license_id)]
 if copyright_file and os.path.isfile(copyright_file):
-    with open(copyright_file) as f:
+    with open(copyright_file, encoding="utf-8") as f:
         copyright_text = f.read()
     for para in copyright_text.split("\n\n"):
         files = []
@@ -326,7 +575,7 @@ if copyright_file and os.path.isfile(copyright_file):
             elif line.startswith("License:"):
                 lic = line[8:].strip().split()[0] if line[8:].strip() else None
                 current_field = "license"
-            elif current_field == "files" and line.startswith("       "):
+            elif current_field == "files" and line.startswith(" ") and not line.startswith(" ."):
                 files.extend(line.strip().split())
         if files and lic:
             for f in files:
@@ -480,6 +729,100 @@ def check_coverage():
 
     return uncovered, stale
 
+def check_license_compatibility(declared_licenses):
+    """Check for known license incompatibilities among declared licenses.
+
+    Returns list of human-readable issue strings.
+    """
+    issues = []
+    norms = {lic: norm_cmp(lic) for lic in declared_licenses}
+
+    has_gpl2_only = any(n == "gpl-2" and not lic.endswith("+") for lic, n in norms.items())
+    has_gpl2plus = any(n == "gpl-2+" or (n == "gpl-2" and lic.endswith("+")) for lic, n in norms.items())
+    has_gpl3_only = any(n == "gpl-3" and not lic.endswith("+") for lic, n in norms.items())
+    has_apache = any("apache" in n for n in norms.values())
+    has_lgpl3 = any(n in ("lgpl-3", "lgpl-3+") for n in norms.values())
+    has_cddl = any("cddl" in n for n in norms.values())
+    has_mpl1 = any(n == "mpl-1.1" for n in norms.values())
+
+    # Apache-2.0 vs GPL-2-only
+    if has_apache and has_gpl2_only and not has_gpl2plus:
+        issues.append(
+            "Apache-2.0 is INCOMPATIBLE with GPL-2 (without 'or later'). "
+            "This is a real license conflict that must be resolved.")
+    elif has_apache and has_gpl2plus:
+        issues.append(
+            "NOTE: Apache-2.0 + GPL-2+ => effective GPL-3+. "
+            "This is compatible for Debian.")
+
+    # GPL-2-only + GPL-3-only (cannot satisfy both simultaneously)
+    if has_gpl2_only and has_gpl3_only:
+        issues.append(
+            "GPL-2 (only) and GPL-3 (only) code cannot be combined — "
+            "no single GPL version satisfies both.")
+
+    # GPL-2-only + LGPL-3+ (LGPL-3 converts to GPL-3, incompatible with GPL-2-only)
+    if has_gpl2_only and has_lgpl3 and not has_gpl2plus:
+        issues.append(
+            "LGPL-3 converts to GPL-3 for combined works, "
+            "which is incompatible with GPL-2 (only).")
+
+    # CDDL + GPL (any version, they are fundamentally incompatible)
+    gpl_any = any("gpl" in n and "lgpl" not in n for n in norms.values())
+    if has_cddl and gpl_any:
+        issues.append(
+            "CDDL and GPL are incompatible copyleft licenses. "
+            "They cannot be combined in a single work.")
+
+    # MPL-1.1 + GPL (MPL-1.1 is not GPL-compatible; MPL-2.0 is)
+    if has_mpl1 and gpl_any:
+        issues.append(
+            "MPL-1.1 is not compatible with the GPL. "
+            "Consider upgrading to MPL-2.0 which has a GPL compatibility clause.")
+
+    # EPL-1.0 + GPL (Eclipse Public License 1.0 is GPL-incompatible)
+    has_epl1 = any(n == "epl-1" for n in norms.values())
+    has_epl2 = any(n == "epl-2" for n in norms.values())
+    if has_epl1 and gpl_any:
+        issues.append(
+            "EPL-1.0 is INCOMPATIBLE with the GPL. "
+            "EPL-2.0 with secondary license notice may allow GPL combination.")
+    # EPL-2.0 note (compatible only with secondary license exception)
+    if has_epl2 and gpl_any:
+        issues.append(
+            "NOTE: EPL-2.0 is GPL-compatible ONLY if the code specifies a "
+            "'Secondary License' (GPL-2.0). Check EPL-2.0 headers for this clause.")
+
+    # OSL-3.0 + GPL (Open Software License — copyleft, GPL-incompatible)
+    has_osl = any("osl" in n for n in norms.values())
+    if has_osl and gpl_any:
+        issues.append(
+            "OSL (Open Software License) is INCOMPATIBLE with the GPL. "
+            "Both are copyleft but mutually exclusive.")
+
+    # OpenSSL + GPL (advertising clause makes it GPL-incompatible)
+    has_openssl = any("openssl" in n for n in norms.values())
+    if has_openssl and gpl_any:
+        issues.append(
+            "OpenSSL license is INCOMPATIBLE with the GPL due to its "
+            "advertising clause. Use a GPL exception or replace OpenSSL.")
+
+    # BSD-4-Clause + GPL (advertising clause makes it GPL-incompatible)
+    has_bsd4 = any(n == "bsd-4-clause" for n in norms.values())
+    if has_bsd4 and gpl_any:
+        issues.append(
+            "BSD-4-Clause (original BSD) is INCOMPATIBLE with the GPL "
+            "due to its advertising clause. Use BSD-3-Clause instead.")
+
+    # QPL-1.0 + GPL (Qt Public License — cannot link with GPL code)
+    has_qpl = any(n == "qpl-1" for n in norms.values())
+    if has_qpl and gpl_any:
+        issues.append(
+            "QPL-1.0 is INCOMPATIBLE with the GPL for linked/combined works. "
+            "QPL-licensed code cannot be combined with GPL code in a single program.")
+
+    return issues
+
 def check_dep5_format():
     """Validate DEP-5 structural/format compliance of debian/copyright.
 
@@ -490,7 +833,7 @@ def check_dep5_format():
     if not copyright_file or not os.path.isfile(copyright_file):
         return issues
 
-    with open(copyright_file) as f:
+    with open(copyright_file, encoding="utf-8") as f:
         raw = f.read()
     lines = raw.split("\n")
 
@@ -708,18 +1051,13 @@ def fix_dep5_format(text):
     return text, fixes
 
 def get_declared_license(filepath):
+    """Return the license declared for filepath using DEP-5 last-match-wins rule."""
     fp = filepath.lstrip("./")
-    best, best_spec = None, -1
+    best = None
+    # DEP-5 spec: when multiple stanzas match, the last one wins
     for glob, lic in stanzas:
-        if fnmatch.fnmatch(fp, glob):
-            spec = glob.count("/") * 100 + len(glob)
-            if spec > best_spec:
-                best_spec = spec
-                best = lic
-    if best is None:
-        for glob, lic in stanzas:
-            if glob == "*":
-                return lic
+        if fnmatch.fnmatch(fp, glob) or glob == "*":
+            best = lic
     return best
 
 # ══════════════════════════════════════════════════════════════════════
@@ -741,12 +1079,101 @@ def classify_fp(filepath, detected, declared):
     return None
 
 def licenses_compatible(detected_raw, declared):
+    """Check if a detected license is compatible with what's declared.
+
+    Handles the full GPL/LGPL/AGPL family, BSD/MIT aliases,
+    and 'or-later' subsumption rules.
+    """
     dn = norm_cmp(declared)
     dn2 = norm_cmp(detected_raw)
     if dn == dn2:
         return True
-    # GPL-2+ subsumes GPL-2
-    if dn in ("gpl-2+", "gpl-2") and dn2 in ("gpl-2+", "gpl-2", "gpl"):
+
+    # "or-later" (+) declared subsumes the base version and higher
+    # e.g. GPL-2+ declared covers GPL-2, GPL-3, GPL-3+ detected
+    GPL_VERSIONS = {
+        "gpl-1": 1, "gpl-1+": 1, "gpl-2": 2, "gpl-2+": 2,
+        "gpl-3": 3, "gpl-3+": 3, "gpl": 2,
+    }
+    LGPL_VERSIONS = {
+        "lgpl-2": 2.0, "lgpl-2+": 2.0, "lgpl-2.1": 2.1, "lgpl-2.1+": 2.1,
+        "lgpl-3": 3.0, "lgpl-3+": 3.0,
+    }
+    AGPL_VERSIONS = {
+        "agpl-1": 1, "agpl-1+": 1,
+        "agpl-3": 3, "agpl-3+": 3,
+    }
+    GFDL_VERSIONS = {
+        "gfdl-1.1": 1.1, "gfdl-1.1+": 1.1,
+        "gfdl-1.2": 1.2, "gfdl-1.2+": 1.2,
+        "gfdl-1.3": 1.3, "gfdl-1.3+": 1.3,
+    }
+
+    for family_map in (GPL_VERSIONS, LGPL_VERSIONS, AGPL_VERSIONS, GFDL_VERSIONS):
+        dv = family_map.get(dn)
+        d2v = family_map.get(dn2)
+        if dv is not None and d2v is not None:
+            is_plus_declared = dn.endswith("+")
+            is_plus_detected = dn2.endswith("+")
+            # Exact family match
+            if dv == d2v:
+                # GPL-2+ declared covers GPL-2 detected (and vice versa if
+                # the declared is at least as permissive)
+                if is_plus_declared:
+                    return True
+                if not is_plus_detected:
+                    return True  # both are -only, same version
+            # or-later declared covers higher versions
+            if is_plus_declared and d2v >= dv:
+                return True
+            # Don't flag or-later detected against a higher -only declared
+            # e.g. GPL-2+ detected, GPL-3 declared  (could be exercised as GPL-3)
+            if is_plus_detected and dv >= d2v:
+                return True
+            break  # Same family, versions don't match
+
+    # BSD family: BSD-2-Clause and BSD-3-Clause are often interchangeable
+    # in practice (scanner may detect one, copyright declares the other)
+    bsd_set = {"bsd-2-clause", "bsd-3-clause", "bsd"}
+    if dn in bsd_set and dn2 in bsd_set:
+        return True
+
+    # MPL-2.0 with secondary license exception is compatible with GPL
+    if "mpl-2" in dn2 and "gpl" in dn:
+        return True
+
+    return False
+
+# Non-free / non-DFSG licenses that warrant a warning.
+# Note: AGPL-3 and CeCILL-2.1 are DFSG-free; they are NOT listed here.
+_NONFREE_RAW = {
+    "sspl-1.0",           # Server Side Public License
+    "busl-1.1",           # Business Source License (MariaDB, HashiCorp, etc.)
+    "commons-clause",     # Commons Clause (added to otherwise open licenses)
+    "elastic-2.0",        # Elastic License 2.0
+    "json",               # JSON License ("Good, not Evil" — non-free per Debian)
+    "rsal-2.0",           # Redis Source Available License
+    "polyform-noncommercial-1.0.0",  # PolyForm Noncommercial
+    "polyform-small-business-1.0.0", # PolyForm Small Business
+    "polyform-shield-1.0.0",         # PolyForm Shield
+    "hippocratic-2.1",    # Hippocratic License (ethical use restriction)
+    "confluent-community-1.0",  # Confluent Community License
+    "apsl-1.0",           # Apple PSL 1.0 (non-free per FSF)
+    "apsl-1.1",           # Apple PSL 1.1 (non-free per FSF)
+    "watcom-1.0",         # Sybase Open Watcom (choice-of-venue / publish-changes)
+}
+NONFREE = {norm_cmp(x) for x in _NONFREE_RAW}
+
+# CC-NC (NonCommercial) and CC-ND (NoDerivatives) are non-free per DFSG.
+# CC-BY and CC-BY-SA (without NC/ND) are DFSG-free and NOT listed here.
+def is_nonfree(license_id):
+    """Check if a license is non-free (DFSG-incompatible)."""
+    n = norm_cmp(license_id)
+    if n in NONFREE:
+        return True
+    # CC licenses with NC or ND restrictions (with or without version)
+    n_lower = n.lower()
+    if "cc-by-nc" in n_lower or "cc-by-nd" in n_lower:
         return True
     return False
 
@@ -778,8 +1205,13 @@ if mode == "generate":
             if d == ".":
                 globs.extend(files)
             else:
-                # If more than half the dir is covered, use dir/*
-                globs.append(d + "/*")
+                # Count total files in this dir across all scan results
+                dir_total = sum(1 for r in scan_results
+                                if str(Path(r["path"].lstrip("./")).parent) == d)
+                if dir_total > 0 and len(files) >= dir_total // 2:
+                    globs.append(d + "/*")
+                else:
+                    globs.extend(files)
         return globs
 
     out = []
@@ -825,10 +1257,11 @@ if mode == "generate":
 
     # Licenses with full text available in /usr/share/common-licenses/
     COMMON_LICENSES = {
-        "GPL-1", "GPL-2", "GPL-2+", "GPL-3", "GPL-3+",
+        "GPL-1", "GPL-1+", "GPL-2", "GPL-2+", "GPL-3", "GPL-3+",
         "LGPL-2", "LGPL-2+", "LGPL-2.1", "LGPL-2.1+", "LGPL-3", "LGPL-3+",
+        "AGPL-3", "AGPL-3+",
         "Apache-2.0", "MPL-1.1", "MPL-2.0",
-        "GFDL", "GFDL-1.2", "GFDL-1.3",
+        "GFDL", "GFDL-1.1", "GFDL-1.1+", "GFDL-1.2", "GFDL-1.2+", "GFDL-1.3", "GFDL-1.3+",
         "Artistic", "BSD", "CC0-1.0",
     }
 
@@ -840,48 +1273,89 @@ if mode == "generate":
         "CC-BY-ND-1.0", "CC-BY-ND-2.0", "CC-BY-ND-2.5", "CC-BY-ND-3.0", "CC-BY-ND-4.0",
         "CC-BY-NC-SA-1.0", "CC-BY-NC-SA-2.0", "CC-BY-NC-SA-2.5", "CC-BY-NC-SA-3.0", "CC-BY-NC-SA-4.0",
         "CC-BY-NC-ND-1.0", "CC-BY-NC-ND-2.0", "CC-BY-NC-ND-2.5", "CC-BY-NC-ND-3.0", "CC-BY-NC-ND-4.0",
+        "CC-PDDC",
     }
 
+    fetched_count = 0
     for lic in sorted(all_lics):
         out.append(f"License: {lic}")
         if lic in COMMON_LICENSES:
             slug = lic.rstrip("+")
             out.append(f" On Debian systems, the full text of this license can be found in")
             out.append(f" `/usr/share/common-licenses/{slug}'.")
-        elif lic in CC_NEEDS_FULL_TEXT:
-            out.append(f" FIXME: Include the FULL legal text of {lic} here.")
-            out.append(f" Creative Commons licenses (except CC0-1.0) are NOT in")
-            out.append(f" /usr/share/common-licenses/. lintian will flag an incomplete")
-            out.append(f" CC license. Download the full text from:")
-            tag = lic.lower().replace("cc-", "").rsplit("-", 1)
-            variant = tag[0] if tag else lic.lower()
-            version = tag[1] if len(tag) > 1 else "4.0"
-            out.append(f" https://creativecommons.org/licenses/{variant}/{version}/legalcode.txt")
         else:
-            out.append(" FIXME: Add the full license text here.")
-            out.append(" This license is not in /usr/share/common-licenses/.")
+            # Try to fetch the full text
+            fetched = fetch_license_text(lic)
+            if fetched:
+                out.append(format_license_body(fetched))
+                fetched_count += 1
+                print(f"  ✓ Fetched full text for {lic}", file=sys.stderr)
+            elif lic in CC_NEEDS_FULL_TEXT:
+                out.append(f" FIXME: Include the FULL legal text of {lic} here.")
+                out.append(f" Creative Commons licenses (except CC0-1.0) are NOT in")
+                out.append(f" /usr/share/common-licenses/. lintian will flag an incomplete")
+                out.append(f" CC license. Download the full text from:")
+                tag = lic.lower().replace("cc-", "").rsplit("-", 1)
+                variant = tag[0] if tag else lic.lower()
+                version = tag[1] if len(tag) > 1 else "4.0"
+                out.append(f" https://creativecommons.org/licenses/{variant}/{version}/legalcode.txt")
+            else:
+                out.append(" FIXME: Add the full license text here.")
+                out.append(" This license is not in /usr/share/common-licenses/.")
         out.append("")
 
     result = "\n".join(out)
     if output_file:
-        with open(output_file, "w") as f:
+        with open(output_file, "w", encoding="utf-8") as f:
             f.write(result)
         print(f"Generated copyright written to: {output_file}", file=sys.stderr)
     else:
         print(result)
+
+    # ── Warnings: non-free and compatibility ──────────────────────
+    nonfree_in_source = [lic for lic in all_lics if is_nonfree(lic)]
+    if nonfree_in_source:
+        print(f"\n  WARNING: {len(nonfree_in_source)} non-free/non-DFSG license(s) detected:", file=sys.stderr)
+        for nf in sorted(nonfree_in_source):
+            print(f"    - {nf}", file=sys.stderr)
+        print("  These cannot be in Debian 'main'. Move to 'non-free' or resolve.", file=sys.stderr)
+
+    compat_issues = check_license_compatibility(all_lics)
+    if compat_issues:
+        print(f"\n  WARNING: {len(compat_issues)} license compatibility issue(s):", file=sys.stderr)
+        for issue in compat_issues:
+            print(f"    - {issue}", file=sys.stderr)
 
     # Summary to stderr
     print(f"\n  Files scanned:  {len(scan_results)}", file=sys.stderr)
     print(f"  License groups: {len(groups)}", file=sys.stderr)
     print(f"  Unique licenses: {len(all_lics)}", file=sys.stderr)
     print(f"  Stanzas (excl. catch-all): {len(groups) - 1}", file=sys.stderr)
+    if fetched_count:
+        print(f"  License texts fetched: {fetched_count}", file=sys.stderr)
+    unfetched = len(all_lics) - fetched_count - len(all_lics & COMMON_LICENSES)
+    if unfetched > 0 and not no_fetch:
+        print(f"  License texts needing manual fill: {unfetched} (FIXME markers)", file=sys.stderr)
+    elif no_fetch:
+        print(f"  License text fetching disabled (--no-fetch)", file=sys.stderr)
     print(f"\n  Review the output carefully — FIXME markers need attention.", file=sys.stderr)
     sys.exit(0)
 
 # ══════════════════════════════════════════════════════════════════════
 # MODE: check / review — validate existing debian/copyright
 # ══════════════════════════════════════════════════════════════════════
-NONFREE = {"agpl-3.0-only", "agpl-3", "cecill", "cecill-c", "sspl-1.0"}
+
+# Load decopy results if available
+decopy_issues = []
+decopy_file = os.path.join(os.path.dirname(scan_file), "decopy.txt")
+if os.path.isfile(decopy_file):
+    try:
+        with open(decopy_file, encoding="utf-8") as f:
+            decopy_raw = f.read().strip()
+        if decopy_raw:
+            decopy_issues = [l for l in decopy_raw.split("\n") if l.strip()]
+    except Exception:
+        pass
 
 real_mismatches = defaultdict(list)
 fp_mismatches = defaultdict(list)
@@ -973,21 +1447,22 @@ if mode == "review":
     for ml in sorted(missing_in_copyright):
         print(f"        {ml} (found in {all_scan_licenses[ml]} files)")
 
-    # Test 5: License compatibility
-    has_gpl2plus = any(l == "GPL-2+" for l in declared_lics)
-    has_gpl2_only = any(l == "GPL-2" for l in declared_lics)
-    has_apache = any("apache" in l.lower() for l in declared_lics)
-    if has_apache and has_gpl2_only:
-        print("[FAIL] Apache-2.0 + GPL-2 (only) conflict!")
-    elif has_apache and has_gpl2plus:
-        print("[PASS] Apache-2.0 + GPL-2+ => effective GPL-3+ (compatible)")
+    # Test 5: License compatibility (check both declared and detected)
+    compat_issues = check_license_compatibility(declared_lics)
+    detected_compat = check_license_compatibility(set(all_scan_licenses.keys()))
+    # Merge, dedup
+    all_compat = list(dict.fromkeys(compat_issues + detected_compat))
+    if all_compat:
+        print(f"[FAIL] License compatibility: {len(all_compat)} conflict(s)")
+        for issue in all_compat:
+            print(f"        {issue}")
     else:
         print("[PASS] No license compatibility issues")
 
     # Test 6: Non-free
     nonfree_found = []
     for dep5, count in all_scan_licenses.items():
-        if norm_cmp(dep5) in NONFREE:
+        if is_nonfree(dep5):
             nonfree_found.append(dep5)
     status = "PASS" if not nonfree_found else "WARN"
     print(f"[{status}] Non-free licenses in source: {len(nonfree_found)}")
@@ -995,9 +1470,7 @@ if mode == "review":
         print(f"        {nf}")
 
     # Test 7: Files with no license
-    source_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".sh", ".pl",
-                   ".java", ".js", ".ts", ".rs", ".go"}
-    src_no_lic = [f for f in no_license if Path(f).suffix.lower() in source_exts]
+    src_no_lic = [f for f in no_license if Path(f).suffix.lower() in SOURCE_EXTS]
     status = "PASS" if len(src_no_lic) == 0 else "INFO"
     print(f"[{status}] Source files without license header: {len(src_no_lic)}")
 
@@ -1019,11 +1492,8 @@ if mode == "review":
     # Test 9: Stanza coverage — uncovered files
     uncovered, stale = check_coverage()
     # Only flag source files as uncovered (data files are fine under catch-all)
-    source_exts2 = {".cpp", ".c", ".h", ".hpp", ".py", ".sh", ".pl",
-                    ".java", ".js", ".ts", ".rs", ".go", ".cc", ".cxx",
-                    ".hxx", ".m", ".mm", ".swift", ".rb"}
     src_uncovered = [(fp, lics) for fp, lics in uncovered
-                     if Path(fp).suffix.lower() in source_exts2]
+                     if Path(fp).suffix.lower() in SOURCE_EXTS]
     status = "PASS" if len(src_uncovered) == 0 else (
         "INFO" if len(src_uncovered) < 5 else "WARN")
     print(f"[{status}] Source files not matched by any stanza: {len(src_uncovered)}")
@@ -1046,6 +1516,23 @@ if mode == "review":
     lic_ok = not lic_issues or not errors
     cov_ok = len(src_uncovered) == 0
     dep5_ok = not dep5_errors
+
+    # Test 11: Decopy findings
+    if decopy_issues:
+        print(f"[INFO] Decopy findings: {len(decopy_issues)} issue(s)")
+        for line in decopy_issues[:5]:
+            print(f"        {line}")
+        if len(decopy_issues) > 5:
+            print(f"        ... and {len(decopy_issues) - 5} more")
+    
+    # Test 12: Low-confidence detections
+    if low_confidence:
+        print(f"[INFO] Low-confidence license detections skipped: {len(low_confidence)}")
+        for path, lic, score in low_confidence[:5]:
+            print(f"        {path}  ({lic}, score={score})")
+        if len(low_confidence) > 5:
+            print(f"        ... and {len(low_confidence) - 5} more")
+
     if (real_count == 0 and not missing_in_copyright and not nonfree_found
             and lic_ok and cov_ok and not stale and dep5_ok):
         print("VERDICT: debian/copyright appears complete and accurate.")
@@ -1171,39 +1658,37 @@ else:
     print("=" * W)
 
     all_declared = set(lic for _, lic in stanzas)
-    has_gpl2_only = any(l == "GPL-2" for l in all_declared)
-    has_gpl2plus = any(l == "GPL-2+" for l in all_declared)
-    has_apache = any("apache" in l.lower() for l in all_declared)
+    compat_issues = check_license_compatibility(all_declared)
+    # Also check detected licenses for conflicts the declared set might miss
+    detected_compat = check_license_compatibility(set(all_scan_licenses.keys()))
+    all_compat = list(dict.fromkeys(compat_issues + detected_compat))
 
-    if has_apache and has_gpl2plus and not has_gpl2_only:
-        print("""
-NOTE: Apache-2.0 files are present alongside GPL-2+ code.
-  Apache-2.0 is incompatible with GPL-2-only but compatible with GPL-3+.
-  Since the main code is GPL-2+ (version 2 "or later"), the effective
-  license of the compiled binary is GPL-3+. This is fine for Debian.
-  Apache-2.0 files:""")
-        for fp in apache_files[:10]:
-            print(f"    {fp}")
-        if len(apache_files) > 10:
-            print(f"    ... and {len(apache_files) - 10} more")
+    if all_compat:
+        for issue in all_compat:
+            print(f"\n  {issue}")
         print()
-    elif has_apache and has_gpl2_only:
-        print("""
-WARNING: Apache-2.0 files detected with GPL-2-only code!
-  Apache-2.0 is INCOMPATIBLE with GPL-2 (without the "or later" clause).
-  This is a real license conflict that must be resolved.
-""")
+
+        # Show Apache details if relevant
+        if apache_files and any("Apache" in i for i in compat_issues):
+            print("  Apache-2.0 files:")
+            for fp in apache_files[:10]:
+                print(f"    {fp}")
+            if len(apache_files) > 10:
+                print(f"    ... and {len(apache_files) - 10} more")
+            print()
     else:
         print("\nNo compatibility issues detected.\n")
 
-    nonfree_found = []
-    for (det, _), files in real_mismatches.items():
-        if norm_cmp(det) in NONFREE:
-            nonfree_found.extend(files)
+    nonfree_found = {}
+    for dep5, count in all_scan_licenses.items():
+        if is_nonfree(dep5):
+            nonfree_found[dep5] = count
     if nonfree_found:
-        print("WARNING: Potentially non-free licensed files detected:")
-        for fp in nonfree_found[:10]:
-            print(f"    {fp}")
+        total = sum(nonfree_found.values())
+        print(f"WARNING: {total} file(s) with non-free/non-DFSG licenses detected:")
+        for lic, count in sorted(nonfree_found.items()):
+            print(f"    {lic} ({count} file(s))")
+        print("  These cannot be in Debian 'main'. Move to 'non-free' or resolve.")
         print()
 
     print("=" * W)
@@ -1222,13 +1707,10 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
     print("=" * W)
 
     uncovered, stale = check_coverage()
-    source_exts2 = {".cpp", ".c", ".h", ".hpp", ".py", ".sh", ".pl",
-                    ".java", ".js", ".ts", ".rs", ".go", ".cc", ".cxx",
-                    ".hxx", ".m", ".mm", ".swift", ".rb"}
     src_uncovered = [(fp, lics) for fp, lics in uncovered
-                     if Path(fp).suffix.lower() in source_exts2]
+                     if Path(fp).suffix.lower() in SOURCE_EXTS]
     data_uncovered = [(fp, lics) for fp, lics in uncovered
-                      if Path(fp).suffix.lower() not in source_exts2]
+                      if Path(fp).suffix.lower() not in SOURCE_EXTS]
 
     if src_uncovered:
         print(f"\n{len(src_uncovered)} source file(s) not matched by any Files: stanza:")
@@ -1270,10 +1752,8 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
     print("=" * W)
 
     if no_license:
-        source_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".sh", ".pl",
-                       ".java", ".js", ".ts", ".rs", ".go"}
         src_no_lic = [f for f in no_license
-                      if Path(f).suffix.lower() in source_exts]
+                      if Path(f).suffix.lower() in SOURCE_EXTS]
         if src_no_lic:
             print(f"\n{len(src_no_lic)} source file(s) with no license header:")
             for fp in src_no_lic[:20]:
@@ -1289,6 +1769,31 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
     else:
         print("\nAll files have detectable license headers.")
     print()
+
+    # Decopy findings (if decopy was run)
+    if decopy_issues:
+        print("=" * W)
+        print("SECTION 8: DECOPY FINDINGS")
+        print("=" * W)
+        print(f"\n{len(decopy_issues)} issue(s) reported by decopy:\n")
+        for line in decopy_issues[:20]:
+            print(f"  {line}")
+        if len(decopy_issues) > 20:
+            print(f"  ... and {len(decopy_issues) - 20} more")
+        print()
+
+    # Low-confidence detections (scancode only)
+    if low_confidence:
+        print("=" * W)
+        print("SECTION 9: LOW-CONFIDENCE DETECTIONS (skipped)")
+        print("=" * W)
+        print(f"\n{len(low_confidence)} detection(s) below confidence threshold "
+              f"({MIN_CONFIDENCE}%):\n")
+        for path, lic, score in low_confidence[:20]:
+            print(f"  {path}  ({lic}, score={score})")
+        if len(low_confidence) > 20:
+            print(f"  ... and {len(low_confidence) - 20} more")
+        print()
 
     # Summary
     print("=" * W)
@@ -1327,8 +1832,10 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
 
         # input() won't work — stdin is the heredoc.
         # Read interactive answers from /dev/tty instead.
+        import atexit
         try:
             _tty = open("/dev/tty", "r")
+            atexit.register(_tty.close)
         except OSError:
             print("ERROR: Cannot open /dev/tty for interactive input.", file=sys.stderr)
             print("  --fix requires an interactive terminal.", file=sys.stderr)
@@ -1352,7 +1859,7 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
                 return ""
 
         # Read the current copyright file
-        with open(copyright_file) as f:
+        with open(copyright_file, encoding="utf-8") as f:
             original_text = f.read()
         working_text = original_text
         changes_made = 0
@@ -1489,15 +1996,16 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
             answer = ask("\n  Remove all stale globs? [y/N] ").strip().lower()
             if answer in ("y", "yes"):
                 for glob_pat, lic in stale:
-                    # Remove the glob from its Files: line
-                    # Pattern: the glob on its own line with leading spaces, or on the Files: line
                     escaped = re.escape(glob_pat)
                     # Try removing from continuation line
                     working_text = re.sub(
                         r'\n       ' + escaped + r'(?=\n)', '', working_text)
-                    # Try removing from Files: line (if it's the only entry)
+                    # If it's the sole entry on a Files: line, remove the entire stanza
                     working_text = re.sub(
-                        r'Files: ' + escaped + r'\n', 'Files: ', working_text)
+                        r'\nFiles: ' + escaped + r'\n'
+                        r'Copyright:[^\n]*(?:\n +[^\n]+)*\n'
+                        r'License:[^\n]*(?:\n .*)*',
+                        '', working_text)
                 changes_made += 1
                 print("  ✓ Removed.\n")
             else:
@@ -1537,10 +2045,11 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
         missing_blocks = stanza_lics - existing_blocks
 
         COMMON_LICENSES = {
-            "GPL-1", "GPL-2", "GPL-2+", "GPL-3", "GPL-3+",
+            "GPL-1", "GPL-1+", "GPL-2", "GPL-2+", "GPL-3", "GPL-3+",
             "LGPL-2", "LGPL-2+", "LGPL-2.1", "LGPL-2.1+", "LGPL-3", "LGPL-3+",
+            "AGPL-3", "AGPL-3+",
             "Apache-2.0", "MPL-1.1", "MPL-2.0",
-            "GFDL", "GFDL-1.2", "GFDL-1.3",
+            "GFDL", "GFDL-1.1", "GFDL-1.1+", "GFDL-1.2", "GFDL-1.2+", "GFDL-1.3", "GFDL-1.3+",
             "Artistic", "BSD", "CC0-1.0",
         }
 
@@ -1554,9 +2063,16 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
                              f" `/usr/share/common-licenses/{slug}'.\n")
                     print(f"  {lic} → will reference /usr/share/common-licenses/{slug}")
                 else:
-                    block = (f"\nLicense: {lic}\n"
-                             f" FIXME: Add the full license text here.\n")
-                    print(f"  {lic} → FIXME stub (you must add the full text)")
+                    # Try fetching full text
+                    fetched = fetch_license_text(lic)
+                    if fetched:
+                        body = format_license_body(fetched)
+                        block = f"\nLicense: {lic}\n{body}\n"
+                        print(f"  {lic} → fetched full text from SPDX/CC")
+                    else:
+                        block = (f"\nLicense: {lic}\n"
+                                 f" FIXME: Add the full license text here.\n")
+                        print(f"  {lic} → FIXME stub (you must add the full text)")
 
                 answer = ask(f"  Add License block for {lic}? [y/N] ").strip().lower()
                 if answer in ("y", "yes"):
@@ -1578,9 +2094,9 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
             if answer in ("y", "yes"):
                 # Write backup
                 backup = copyright_file + ".bak"
-                with open(backup, "w") as f:
+                with open(backup, "w", encoding="utf-8") as f:
                     f.write(original_text)
-                with open(copyright_file, "w") as f:
+                with open(copyright_file, "w", encoding="utf-8") as f:
                     f.write(working_text)
                 print(f"\n  ✓ Written to {copyright_file}")
                 print(f"  ✓ Backup saved to {backup}")
@@ -1588,7 +2104,7 @@ WARNING: Apache-2.0 files detected with GPL-2-only code!
                 # Offer to write to a different file
                 alt = ask("  Write to alternate file instead? [path or Enter to discard] ").strip()
                 if alt:
-                    with open(alt, "w") as f:
+                    with open(alt, "w", encoding="utf-8") as f:
                         f.write(working_text)
                     print(f"  ✓ Written to {alt}")
                 else:
