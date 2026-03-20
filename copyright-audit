@@ -1421,14 +1421,18 @@ def format_copyright_field(merged_lines, max_col=80):
 
 def check_copyright_holders():
     """Compare detected copyright holders against declared ones per stanza.
-    Returns: (missing, extra)
-      missing: [(filepath, detected_holder)] — detected but not declared
+    Returns: (missing, extra, star_file_map)
+      missing: [(glob, detected_holder)] — detected but not declared
       extra: [(glob, declared_holder)] — declared but not found in any scanned file
+      star_file_map: {holder_string: set_of_file_paths} — for the * glob only,
+        maps each missing holder to the files where it was detected
     """
     # In DEP-5, when multiple stanzas match a file, the last one wins.
     # Map each file's copyrights only to its governing stanza.
     detected_per_glob = defaultdict(set)
     declared_per_glob = {}
+    # For the * glob, also track which files contribute each holder
+    star_holder_files = defaultdict(set)  # holder_string → set of filepaths
 
     for glob_pat, lic in stanzas:
         declared_per_glob[glob_pat] = set(stanza_copyrights.get(glob_pat, []))
@@ -1444,6 +1448,8 @@ def check_copyright_holders():
             for c in r.get("copyrights", []):
                 if c:
                     detected_per_glob[governing_glob].add(c)
+                    if governing_glob == "*":
+                        star_holder_files[c].add(fp)
 
     missing_holders = []  # (glob, detected_holder_not_declared)
     extra_holders = []    # (glob, declared_holder_not_detected)
@@ -1469,7 +1475,7 @@ def check_copyright_holders():
             if not any(dk in dn or dn in dk for dn in detected_norms):
                 extra_holders.append((glob_pat, original))
 
-    return missing_holders, extra_holders
+    return missing_holders, extra_holders, star_holder_files
 
 # ══════════════════════════════════════════════════════════════════════
 # False-positive heuristic
@@ -2105,7 +2111,7 @@ if mode == "review":
     dep5_ok = not dep5_errors
 
     # Test 11: Copyright holder accuracy
-    missing_holders, extra_holders = check_copyright_holders()
+    missing_holders, extra_holders, _ = check_copyright_holders()
     cop_total = len(missing_holders) + len(extra_holders)
     if cop_total == 0:
         print("[PASS] Copyright holders match detected holders")
@@ -2383,7 +2389,7 @@ else:
     print()
 
     # Copyright holder audit
-    missing_holders, extra_holders = check_copyright_holders()
+    missing_holders, extra_holders, _ = check_copyright_holders()
     print("=" * W)
     print("SECTION 8: COPYRIGHT HOLDER ACCURACY")
     print("=" * W)
@@ -2842,7 +2848,7 @@ else:
         stanza_copyrights.clear()
         stanza_copyrights.update(stanza_copyrights_now)
 
-        missing_holders, extra_holders = check_copyright_holders()
+        missing_holders, extra_holders, star_file_map = check_copyright_holders()
 
         # Restore originals
         stanzas.clear()
@@ -2882,6 +2888,117 @@ else:
             for glob_pat, holders in sorted(by_glob.items()):
                 # Clean holders: strip Copyright/(C) prefix, merge years
                 cleaned = merge_copyrights(holders, prefer_unicode=_unicode_pref)
+
+                if glob_pat == "*":
+                    # Don't add deep-tree holders to the * catch-all.
+                    # In DEP-5, Files: * is the project baseline/default.
+                    # Holders from specific subdirectories belong in their
+                    # own stanzas rather than being lumped into *.
+                    star_files = set()
+                    for h in holders:
+                        star_files.update(star_file_map.get(h, set()))
+                    if not star_files:
+                        continue
+
+                    # Get the * stanza's license
+                    star_license = "FIXME"
+                    for g, l in stanzas_now:
+                        if g == "*":
+                            star_license = l
+                            break
+
+                    # Build no_glob_dirs from parent dirs of existing
+                    # stanza globs so new dir/* globs don't override
+                    # existing specific stanzas (DEP-5 last-match-wins).
+                    _no_glob = set()
+                    for g, l in stanzas_now:
+                        if g != "*":
+                            d = os.path.dirname(g)
+                            if d:
+                                _no_glob.add(d)
+
+                    # Get the * stanza's declared holders (to exclude
+                    # them — they're already covered by *).
+                    star_declared = set()
+                    for c in stanza_copyrights_now.get("*", []):
+                        n = norm_copyright(c)
+                        if n:
+                            star_declared.add(n)
+
+                    # Group files by their unique set of NEW holders
+                    # (holders not already declared in *).
+                    file_holders = {}  # filepath → frozenset of raw holders
+                    for fp in star_files:
+                        fp_cops = get_copyrights_for_files([fp])
+                        # Keep only holders not already in *
+                        new_cops = []
+                        for c in fp_cops:
+                            nc = norm_copyright(c)
+                            if nc and not any(nc in d or d in nc
+                                              for d in star_declared):
+                                new_cops.append(c)
+                        if new_cops:
+                            key = frozenset(norm_copyright(c) for c in new_cops)
+                            file_holders[fp] = (key, new_cops)
+
+                    # Group files sharing the same holder set
+                    from collections import OrderedDict
+                    holder_groups = OrderedDict()  # key → (raw_holders, files)
+                    for fp, (key, raw) in sorted(file_holders.items()):
+                        if key not in holder_groups:
+                            holder_groups[key] = (raw, [])
+                        holder_groups[key][1].append(fp)
+
+                    if not holder_groups:
+                        continue
+
+                    print(f"  Files governed by * have {len(cleaned)}"
+                          f" undeclared holder(s).")
+                    print(f"  Proposing directory-specific stanza(s)"
+                          f" instead of")
+                    print(f"  adding them to the catch-all:\n")
+
+                    for _hkey, (raw_cops, group_files) in holder_groups.items():
+                        globs = make_fix_globs(group_files,
+                                               no_glob_dirs=_no_glob)
+                        merged_cops = merge_copyrights(
+                            raw_cops, prefer_unicode=_unicode_pref)
+                        cop_field = format_copyright_field(merged_cops)
+
+                        print(f"  ┌──────────────────────────────────────")
+                        if len(globs) <= 3:
+                            print(f"  │ Files: {globs[0]}")
+                            for g in globs[1:]:
+                                print(f"  │        {g}")
+                        else:
+                            print(f"  │ Files: {globs[0]}")
+                            print(f"  │        {globs[1]}")
+                            print(f"  │        "
+                                  f"... ({len(globs)} globs total)")
+                        for i, cl in enumerate(merged_cops or ["FIXME"]):
+                            tag = "Copyright" if i == 0 else "          "
+                            print(f"  │ {tag}: {cl}")
+                        print(f"  │ License: {star_license}")
+                        print(f"  └──────────────────────────────────────")
+
+                        answer = ask(
+                            "  Add this stanza? [y/N] ").strip().lower()
+                        if answer in ("y", "yes"):
+                            files_str = format_files_field(globs)
+                            stanza_text = (
+                                f"\n{files_str}\n"
+                                f"Copyright: {cop_field}\n"
+                                f"License: {star_license}\n")
+                            pos = find_stanza_insert_pos(working_text)
+                            working_text = (working_text[:pos]
+                                            + stanza_text
+                                            + working_text[pos:])
+                            changes_made += 1
+                            print(f"  ✓ Added.\n")
+                        else:
+                            print(f"  ✗ Skipped.\n")
+                    continue
+
                 print(f"  Stanza: Files: {glob_pat}")
                 for h in cleaned:
                     print(f"    + {h}")
