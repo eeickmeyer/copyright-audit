@@ -235,6 +235,18 @@ packager_name = os.environ.get("PACKAGER_NAME", "")
 packager_email = os.environ.get("PACKAGER_EMAIL", "")
 packager_year = os.environ.get("PACKAGER_YEAR", "")
 
+# ── Detect native Debian packages ─────────────────────────────────────
+# Native packages ("3.0 (native)") have no upstream/debian split, so a
+# separate Files: debian/* stanza is inappropriate.
+def _is_native_package():
+    try:
+        fmt = Path("debian/source/format").read_text(encoding="utf-8").strip()
+        return fmt == "3.0 (native)"
+    except (OSError, UnicodeDecodeError):
+        return False
+
+is_native = _is_native_package()
+
 # ══════════════════════════════════════════════════════════════════════
 # License text fetcher — downloads from SPDX or Creative Commons
 # ══════════════════════════════════════════════════════════════════════
@@ -312,14 +324,28 @@ def _fetch_url(url, timeout=15):
     except (URLError, OSError, ValueError):
         return None
 
-def format_license_body(text):
-    """Format fetched license text for DEP-5 (indent each line with a space)."""
+def format_license_body(text, max_col=80):
+    """Format fetched license text for DEP-5 (indent each line with a space).
+    Word-wraps lines that would exceed max_col."""
+    body_width = max_col - 1  # 1-space DEP-5 indent leaves this much for content
     lines = []
     for line in text.splitlines():
         if line.strip() == "":
             lines.append(" .")
-        else:
+        elif len(line) <= body_width:
             lines.append(" " + line)
+        else:
+            stripped = line.lstrip()
+            leading = line[:len(line) - len(stripped)]
+            avail = body_width - len(leading)
+            if avail < 20:
+                lines.append(" " + line)
+            else:
+                wrapped = textwrap.wrap(
+                    stripped, width=avail,
+                    break_long_words=False, break_on_hyphens=False)
+                for wl in (wrapped or [stripped]):
+                    lines.append(" " + leading + wl)
     return "\n".join(lines)
 
 exclude_raw = os.environ.get("EXCLUDE_STR", "").strip()
@@ -1284,16 +1310,59 @@ def merge_copyrights(raw_list):
             lines.append(name)
     return lines
 
-def format_copyright_field(merged_lines):
+def format_files_field(globs, max_col=80):
+    """Format a complete Files: field with continuation indentation."""
+    prefix = "Files: "
+    indent = " " * len(prefix)
+    lines = []
+    for i, g in enumerate(globs):
+        if i == 0:
+            lines.append(prefix + g)
+        else:
+            lines.append(indent + g)
+    return "\n".join(lines)
+
+def _copyright_continuations(holders, max_col=80):
+    """Format holders as indented copyright continuation lines."""
+    indent = " " * 11
+    avail = max_col - 11
+    parts = []
+    for h in holders:
+        if len(h) <= avail:
+            parts.append(indent + h)
+        else:
+            wrapped = textwrap.wrap(
+                h, width=avail,
+                break_long_words=False, break_on_hyphens=False)
+            for wl in (wrapped or [h]):
+                parts.append(indent + wl)
+    return "\n".join(parts)
+
+def format_copyright_field(merged_lines, max_col=80):
     """Format merged copyright lines into a DEP-5 Copyright: field value.
-    First line follows 'Copyright:', subsequent lines are continuation."""
+    First line follows 'Copyright:', subsequent lines are continuation.
+    Wraps individual entries that would exceed max_col."""
     if not merged_lines:
         return "FIXME"
-    first = merged_lines[0]
-    rest = merged_lines[1:]
-    if not rest:
-        return first
-    return first + "\n" + "\n".join("           " + l for l in rest)
+    indent = " " * 11
+    avail = max_col - 11
+    parts = []
+    for i, line in enumerate(merged_lines):
+        if len(line) <= avail:
+            if i == 0:
+                parts.append(line)
+            else:
+                parts.append(indent + line)
+        else:
+            wrapped = textwrap.wrap(
+                line, width=avail,
+                break_long_words=False, break_on_hyphens=False)
+            for j, wl in enumerate(wrapped or [line]):
+                if i == 0 and j == 0:
+                    parts.append(wl)
+                else:
+                    parts.append(indent + wl)
+    return "\n".join(parts)
 
 def check_copyright_holders():
     """Compare detected copyright holders against declared ones per stanza.
@@ -1573,8 +1642,13 @@ if mode == "generate":
     # a single stanza with multiple dir/* globs.
     stanza_map = defaultdict(list)  # (lic_key, frozenset(cops)) → [paths]
     for (lic_key, d), grp in dir_groups.items():
-        # Exclude debian/ files — a dedicated debian/* stanza is always proposed
-        paths = [p for p in grp["paths"] if not p.startswith("debian/")]
+        # For non-native packages, exclude debian/ files — a dedicated
+        # debian/* stanza is proposed separately.  For native packages
+        # debian/ files are kept with the rest of the source tree.
+        if is_native:
+            paths = grp["paths"]
+        else:
+            paths = [p for p in grp["paths"] if not p.startswith("debian/")]
         if not paths:
             continue
         sk = (lic_key, frozenset(grp["cops"]))
@@ -1588,37 +1662,16 @@ if mode == "generate":
         merged_cops = merge_copyrights(cops_raw)
         globs = make_glob(paths)
 
-        out.append("Files: " + "\n       ".join(globs))
+        out.append(format_files_field(globs))
         out.append("Copyright: " + format_copyright_field(merged_cops))
         out.append("License: " + " AND ".join(lic_key))
         out.append("")
 
     # ── debian/* packaging stanza ─────────────────────────────────
-    # In generate mode we always propose a debian/* stanza with the
-    # current packager's identity — there is no pre-existing file.
+    # For non-native packages, propose a dedicated debian/* stanza with
+    # the packager's identity.  Native packages (3.0 (native)) have no
+    # upstream/debian split so this stanza is not applicable.
     deb_lic_added = None
-
-    # Build packager copyright string from detected identity
-    packager_cop = ""
-    if packager_name or packager_email:
-        parts = []
-        if packager_year:
-            parts.append(packager_year)
-        if packager_name:
-            parts.append(packager_name)
-        if packager_email:
-            parts.append(f"<{packager_email}>")
-        packager_cop = " ".join(parts)
-
-    deb_lic = "GPL-2+"
-    deb_cop = packager_cop or "FIXME"
-
-    print("\n  Proposing debian/* packaging copyright:", file=sys.stderr)
-    print(f"  ┌──────────────────────────────────────", file=sys.stderr)
-    print(f"  │ Files: debian/*", file=sys.stderr)
-    print(f"  │ Copyright: {deb_cop}", file=sys.stderr)
-    print(f"  │ License: {deb_lic}", file=sys.stderr)
-    print(f"  └──────────────────────────────────────", file=sys.stderr)
 
     # Interactive prompt (read from /dev/tty since stdout may be piped)
     try:
@@ -1640,27 +1693,52 @@ if mode == "generate":
                 return ""
         return ""
 
-    answer = gen_ask("  Accept this stanza? [Y/n/e(dit)] ").strip().lower()
-    if answer in ("e", "edit"):
-        print("  Enter copyright holder (or press Enter to keep):", file=sys.stderr)
-        new_cop = gen_ask(f"    Copyright [{deb_cop}]: ").strip()
-        if new_cop:
-            deb_cop = new_cop
-        print("  Enter license (or press Enter to keep):", file=sys.stderr)
-        new_lic = gen_ask(f"    License [{deb_lic}]: ").strip()
-        if new_lic:
-            deb_lic = new_lic
-        answer = "y"
+    if not is_native:
+        # Build packager copyright string from detected identity
+        packager_cop = ""
+        if packager_name or packager_email:
+            parts = []
+            if packager_year:
+                parts.append(packager_year)
+            if packager_name:
+                parts.append(packager_name)
+            if packager_email:
+                parts.append(f"<{packager_email}>")
+            packager_cop = " ".join(parts)
 
-    if answer not in ("n", "no"):
-        out.append("Files: debian/*")
-        out.append(f"Copyright: {deb_cop}")
-        out.append(f"License: {deb_lic}")
-        out.append("")
-        deb_lic_added = deb_lic
-        print("  ✓ debian/* stanza added.", file=sys.stderr)
+        deb_lic = "GPL-2+"
+        deb_cop = packager_cop or "FIXME"
+
+        print("\n  Proposing debian/* packaging copyright:", file=sys.stderr)
+        print(f"  ┌──────────────────────────────────────", file=sys.stderr)
+        print(f"  │ Files: debian/*", file=sys.stderr)
+        print(f"  │ Copyright: {deb_cop}", file=sys.stderr)
+        print(f"  │ License: {deb_lic}", file=sys.stderr)
+        print(f"  └──────────────────────────────────────", file=sys.stderr)
+
+        answer = gen_ask("  Accept this stanza? [Y/n/e(dit)] ").strip().lower()
+        if answer in ("e", "edit"):
+            print("  Enter copyright holder (or press Enter to keep):", file=sys.stderr)
+            new_cop = gen_ask(f"    Copyright [{deb_cop}]: ").strip()
+            if new_cop:
+                deb_cop = new_cop
+            print("  Enter license (or press Enter to keep):", file=sys.stderr)
+            new_lic = gen_ask(f"    License [{deb_lic}]: ").strip()
+            if new_lic:
+                deb_lic = new_lic
+            answer = "y"
+
+        if answer not in ("n", "no"):
+            out.append("Files: debian/*")
+            out.append(f"Copyright: {deb_cop}")
+            out.append(f"License: {deb_lic}")
+            out.append("")
+            deb_lic_added = deb_lic
+            print("  ✓ debian/* stanza added.", file=sys.stderr)
+        else:
+            print("  ✗ debian/* stanza skipped.", file=sys.stderr)
     else:
-        print("  ✗ debian/* stanza skipped.", file=sys.stderr)
+        print("\n  Native package — skipping debian/* stanza.", file=sys.stderr)
 
     if _gen_tty:
         _gen_tty.close()
@@ -2183,9 +2261,9 @@ else:
         print("All Files: globs match at least one file in the source tree.")
         print()
 
-    # Check for missing debian/* stanza
+    # Check for missing debian/* stanza (not applicable for native packages)
     has_debian_glob = any(g in ("debian/*", "debian/**") for g, _ in stanzas)
-    if stanzas and not has_debian_glob:
+    if stanzas and not has_debian_glob and not is_native:
         print("  WARNING: No debian/* stanza found in debian/copyright.")
         print("  Packaging files (debian/*) should have their own Files stanza")
         print("  with the packager's copyright. Use --fix to add one.")
@@ -2489,8 +2567,8 @@ else:
 
                 if answer in ("y", "yes"):
                     # Build the stanza text
-                    file_lines = "\n       ".join(globs)
-                    stanza = f"\nFiles: {file_lines}\nCopyright: {cop_field}\nLicense: {det_lic}\n"
+                    files_str = format_files_field(globs)
+                    stanza = f"\n{files_str}\nCopyright: {cop_field}\nLicense: {det_lic}\n"
                     pos = find_stanza_insert_pos(working_text)
                     working_text = working_text[:pos] + stanza + working_text[pos:]
                     changes_made += 1
@@ -2510,8 +2588,8 @@ else:
                     new_lic = ask("    License: ").strip()
                     if not new_lic:
                         new_lic = det_lic
-                    file_lines = "\n       ".join(globs)
-                    stanza = f"\nFiles: {file_lines}\nCopyright: {cop_field}\nLicense: {new_lic}\n"
+                    files_str = format_files_field(globs)
+                    stanza = f"\n{files_str}\nCopyright: {cop_field}\nLicense: {new_lic}\n"
                     pos = find_stanza_insert_pos(working_text)
                     working_text = working_text[:pos] + stanza + working_text[pos:]
                     changes_made += 1
@@ -2650,8 +2728,7 @@ else:
                     m = re.search(pat, working_text)
                     if m:
                         old = m.group(0)
-                        addition = "\n           ".join(cleaned)
-                        new = old + "\n           " + addition
+                        new = old + "\n" + _copyright_continuations(cleaned)
                         working_text = working_text.replace(old, new, 1)
                         changes_made += 1
                         print(f"  ✓ Added.\n")
@@ -2670,6 +2747,7 @@ else:
             print("  requirements may still apply. Review manually.\n")
 
         # ── Fix 5: Propose debian/* stanza if missing ────────────────
+        # Not applicable for native packages (3.0 (native)).
         has_debian_glob = any(g in ("debian/*", "debian/**")
                              for g, _ in stanzas)
 
@@ -2685,7 +2763,9 @@ else:
                 parts.append(f"<{packager_email}>")
             packager_cop = " ".join(parts)
 
-        if not has_debian_glob:
+        if is_native:
+            pass  # native packages don't need a separate debian/* stanza
+        elif not has_debian_glob:
             deb_lic = "GPL-2+"
             deb_cop = packager_cop or "FIXME"
 
@@ -2746,7 +2826,7 @@ else:
                     m = re.search(pat, working_text)
                     if m:
                         old = m.group(0)
-                        new = old + "\n           " + packager_cop
+                        new = old + "\n" + _copyright_continuations([packager_cop])
                         working_text = working_text.replace(old, new, 1)
                         changes_made += 1
                         print(f"  ✓ Added to debian/* stanza.\n")
