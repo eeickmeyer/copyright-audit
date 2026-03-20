@@ -1322,10 +1322,11 @@ def format_files_field(globs, max_col=80):
             lines.append(indent + g)
     return "\n".join(lines)
 
-def _copyright_continuations(holders, max_col=80):
+def _copyright_continuations(holders, max_col=80, indent=None):
     """Format holders as indented copyright continuation lines."""
-    indent = " " * 11
-    avail = max_col - 11
+    if indent is None:
+        indent = " " * 11
+    avail = max_col - len(indent)
     parts = []
     for h in holders:
         if len(h) <= avail:
@@ -1595,20 +1596,33 @@ if mode == "generate":
         return deduped
 
     # ── Build per-directory stanza groups ────────────────────────────
-    # Key: (lic_key, directory) → copyrights set.
     # Root-level files with the catch-all license go into Files: *.
-    # Everything else gets its own stanza.
-    dir_groups = defaultdict(lambda: {"paths": [], "cops": set()})
+    # Within each directory, the majority license gets a dir/* glob;
+    # files with minority licenses are listed individually so that
+    # DEP-5 last-match-wins correctly overrides the directory glob.
+    dir_lic_files = defaultdict(lambda: defaultdict(list))
     root_catchall_cops = set()
     for e in file_entries:
         d = str(Path(e["path"]).parent)
         if e["lic"] == biggest_key and d == ".":
-            # Root-level files with the dominant license → catch-all
             root_catchall_cops.update(e["cops"])
         else:
-            key = (e["lic"], d)
-            dir_groups[key]["paths"].append(e["path"])
-            dir_groups[key]["cops"].update(e["cops"])
+            dir_lic_files[d][e["lic"]].append(e)
+
+    glob_groups = defaultdict(lambda: {"paths": [], "cops": set()})
+    file_groups = defaultdict(lambda: {"paths": [], "cops": set()})
+    for d, lic_entries in dir_lic_files.items():
+        majority_lic = max(lic_entries, key=lambda k: len(lic_entries[k]))
+        for lic_key, entries in lic_entries.items():
+            for e in entries:
+                if lic_key == majority_lic:
+                    key = (lic_key, d)
+                    glob_groups[key]["paths"].append(e["path"])
+                    glob_groups[key]["cops"].update(e["cops"])
+                else:
+                    key = (lic_key, d)
+                    file_groups[key]["paths"].append(e["path"])
+                    file_groups[key]["cops"].update(e["cops"])
 
     out = []
     out.append("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/")
@@ -1637,24 +1651,23 @@ if mode == "generate":
     out.append("License: " + " AND ".join(biggest_key))
     out.append("")
 
-    # ── Merge dir_groups that share the same license + copyrights ────
+    # ── Merge glob_groups that share the same license + copyrights ───
     # Consolidate directories with identical (license, copyright set) into
     # a single stanza with multiple dir/* globs.
-    stanza_map = defaultdict(list)  # (lic_key, frozenset(cops)) → [paths]
-    for (lic_key, d), grp in dir_groups.items():
-        # For non-native packages, exclude debian/ files — a dedicated
-        # debian/* stanza is proposed separately.  For native packages
-        # debian/ files are kept with the rest of the source tree.
+    def _filter_debian(paths):
         if is_native:
-            paths = grp["paths"]
-        else:
-            paths = [p for p in grp["paths"] if not p.startswith("debian/")]
+            return paths
+        return [p for p in paths if not p.startswith("debian/")]
+
+    stanza_map = defaultdict(list)  # (lic_key, frozenset(cops)) → [paths]
+    for (lic_key, d), grp in glob_groups.items():
+        paths = _filter_debian(grp["paths"])
         if not paths:
             continue
         sk = (lic_key, frozenset(grp["cops"]))
         stanza_map[sk].extend(paths)
 
-    # Other stanzas (sorted by license then first path for stable output)
+    # Directory-level stanzas (majority license per directory)
     for sk in sorted(stanza_map, key=lambda k: (k[0], sorted(stanza_map[k])[0])):
         lic_key, cops_frozen = sk
         paths = sorted(stanza_map[sk])
@@ -1663,6 +1676,27 @@ if mode == "generate":
         globs = make_glob(paths)
 
         out.append(format_files_field(globs))
+        out.append("Copyright: " + format_copyright_field(merged_cops))
+        out.append("License: " + " AND ".join(lic_key))
+        out.append("")
+
+    # File-specific stanzas for minority licenses (listed after directory
+    # globs so DEP-5 last-match-wins applies the correct license).
+    file_stanza_map = defaultdict(list)
+    for (lic_key, d), grp in file_groups.items():
+        paths = _filter_debian(grp["paths"])
+        if not paths:
+            continue
+        sk = (lic_key, frozenset(grp["cops"]))
+        file_stanza_map[sk].extend(paths)
+
+    for sk in sorted(file_stanza_map, key=lambda k: (k[0], sorted(file_stanza_map[k])[0])):
+        lic_key, cops_frozen = sk
+        paths = sorted(file_stanza_map[sk])
+        cops_raw = sorted(cops_frozen)
+        merged_cops = merge_copyrights(cops_raw)
+
+        out.append(format_files_field(paths))  # explicit paths, no globbing
         out.append("Copyright: " + format_copyright_field(merged_cops))
         out.append("License: " + " AND ".join(lic_key))
         out.append("")
@@ -1747,6 +1781,8 @@ if mode == "generate":
     all_lics = set()
     all_lics.update(biggest_key)
     for (lic_key, _cops_fs) in stanza_map:
+        all_lics.update(lic_key)
+    for (lic_key, _cops_fs) in file_stanza_map:
         all_lics.update(lic_key)
     if deb_lic_added:
         all_lics.add(deb_lic_added)
@@ -2433,9 +2469,10 @@ else:
         changes_made = 0
 
         # Helper: build compact globs from a list of file paths
-        def make_fix_globs(paths):
+        def make_fix_globs(paths, no_glob_dirs=frozenset()):
             """Group files by directory and produce compact globs.
-            Uses dir/* only when multiple files share a directory."""
+            Uses dir/* only when multiple files share a directory.
+            Directories in no_glob_dirs are always listed individually."""
             dirs = defaultdict(list)
             for p in paths:
                 p = p.lstrip("./")
@@ -2445,10 +2482,10 @@ else:
             for d, files in sorted(dirs.items()):
                 if d == ".":
                     globs.extend(sorted(files))
-                elif len(files) > 1:
+                elif len(files) > 1 and d not in no_glob_dirs:
                     globs.append(d + "/*")
                 else:
-                    globs.extend(files)
+                    globs.extend(sorted(files))
             return globs
 
         # Helper: find the copyright holders for a set of files from scan
@@ -2521,6 +2558,7 @@ else:
                     dir_lic_files[d][det_lic].append(f)
 
             deduped_by_license = defaultdict(list)
+            split_dirs = {}  # dir -> dominant license
             for d, lic_map in dir_lic_files.items():
                 if len(lic_map) == 1:
                     # Only one license in this directory — keep as-is
@@ -2529,6 +2567,7 @@ else:
                 else:
                     # Multiple licenses — assign dir/* to the dominant one
                     dominant = max(lic_map, key=lambda l: len(lic_map[l]))
+                    split_dirs[d] = dominant
                     deduped_by_license[dominant].extend(lic_map[dominant])
                     for det_lic, files in lic_map.items():
                         if det_lic != dominant:
@@ -2542,7 +2581,10 @@ else:
                 print("files whose detected license differs from what's declared:\n")
 
             for det_lic, files in sorted(by_license.items()):
-                globs = make_fix_globs(files)
+                # Don't glob directories where this license is the minority
+                no_glob = {d for d, dom in split_dirs.items()
+                           if dom != det_lic}
+                globs = make_fix_globs(files, no_glob_dirs=no_glob)
                 cops = get_copyrights_for_files(files)
                 merged_cops = merge_copyrights(cops)
                 cop_field = format_copyright_field(merged_cops)
@@ -2722,17 +2764,45 @@ else:
                 answer = ask(f"  Add missing holder(s) to this stanza? [y/N] ").strip().lower()
                 if answer in ("y", "yes"):
                     escaped_glob = re.escape(glob_pat)
-                    # Find the Copyright field (including continuation lines)
-                    pat = (r'(Files:[^\n]*' + escaped_glob + r'[^\n]*\n'
-                           r'Copyright:[^\n]*(?:\n +[^\n]+)*)')
-                    m = re.search(pat, working_text)
-                    if m:
-                        old = m.group(0)
-                        new = old + "\n" + _copyright_continuations(cleaned)
-                        working_text = working_text.replace(old, new, 1)
-                        changes_made += 1
-                        print(f"  ✓ Added.\n")
-                    else:
+                    # Find the stanza containing this glob anywhere in
+                    # its Files: field (first line or continuation lines).
+                    files_pat = r'(Files:[^\n]*(?:\n +[^\n]+)*)'
+                    found = False
+                    for fm in re.finditer(files_pat, working_text):
+                        if re.search(r'(?:^Files:\s*|(?<=\n)\s+)' + escaped_glob + r'\s*$', fm.group(0), re.MULTILINE):
+                            rest = working_text[fm.end():]
+                            cop_m = re.match(r'(\nCopyright:[^\n]*(?:\n +[^\n]+)*)', rest)
+                            if cop_m:
+                                # Detect existing indent from copyright continuation lines
+                                cop_lines = cop_m.group(0).split('\n')
+                                existing_indent = " " * 11
+                                for cl in cop_lines[2:]:
+                                    m = re.match(r'^( +)', cl)
+                                    if m:
+                                        existing_indent = m.group(1)
+                                        break
+                                # Filter out holders already present in the copyright block
+                                existing_text = cop_m.group(0)
+                                existing_norms = set()
+                                for cl in existing_text.split('\n'):
+                                    nc = norm_copyright(cl.strip())
+                                    if nc:
+                                        existing_norms.add(nc)
+                                new_holders = [h for h in cleaned
+                                               if not any(norm_copyright(h) in en or en in norm_copyright(h)
+                                                          for en in existing_norms)]
+                                if new_holders:
+                                    old = fm.group(0) + cop_m.group(0)
+                                    new = old + "\n" + _copyright_continuations(new_holders, indent=existing_indent)
+                                    working_text = working_text.replace(old, new, 1)
+                                    changes_made += 1
+                                    found = True
+                                    print(f"  ✓ Added.\n")
+                                else:
+                                    found = True
+                                    print(f"  ✓ Already present.\n")
+                            break
+                    if not found:
                         print(f"  ✗ Could not locate stanza (edit manually).\n")
                 else:
                     print(f"  ✗ Skipped.\n")
@@ -2821,16 +2891,29 @@ else:
                     answer = "y"
                 if answer not in ("n", "no"):
                     escaped_glob = re.escape(deb_glob)
-                    pat = (r'(Files:[^\n]*' + escaped_glob + r'[^\n]*\n'
-                           r'Copyright:[^\n]*(?:\n +[^\n]+)*)')
-                    m = re.search(pat, working_text)
-                    if m:
-                        old = m.group(0)
-                        new = old + "\n" + _copyright_continuations([packager_cop])
-                        working_text = working_text.replace(old, new, 1)
-                        changes_made += 1
-                        print(f"  ✓ Added to debian/* stanza.\n")
-                    else:
+                    files_pat = r'(Files:[^\n]*(?:\n +[^\n]+)*)'
+                    found = False
+                    for fm in re.finditer(files_pat, working_text):
+                        if re.search(r'(?:^Files:\s*|(?<=\n)\s+)' + escaped_glob + r'\s*$', fm.group(0), re.MULTILINE):
+                            rest = working_text[fm.end():]
+                            cop_m = re.match(r'(\nCopyright:[^\n]*(?:\n +[^\n]+)*)', rest)
+                            if cop_m:
+                                # Detect existing indent
+                                cop_lines = cop_m.group(0).split('\n')
+                                existing_indent = " " * 11
+                                for cl in cop_lines[2:]:
+                                    m = re.match(r'^( +)', cl)
+                                    if m:
+                                        existing_indent = m.group(1)
+                                        break
+                                old = fm.group(0) + cop_m.group(0)
+                                new = old + "\n" + _copyright_continuations([packager_cop], indent=existing_indent)
+                                working_text = working_text.replace(old, new, 1)
+                                changes_made += 1
+                                found = True
+                                print(f"  ✓ Added to debian/* stanza.\n")
+                            break
+                    if not found:
                         print(f"  ✗ Could not locate stanza (edit manually).\n")
                 else:
                     print(f"  ✗ Skipped.\n")
