@@ -1,103 +1,59 @@
 # Copyright Audit
 
-A Debian `debian/copyright` file generator, validator, and reviewer. Scans source trees for license and copyright information using [ScanCode Toolkit](https://github.com/aboutcode-org/scancode-toolkit) (SPDX license database) when available, falling back to `licensecheck` otherwise.
+A Debian `debian/copyright` file generator, validator, and reviewer. Scans source trees using [ScanCode Toolkit](https://github.com/aboutcode-org/scancode-toolkit) or `licensecheck`.
 
 ## Features
 
-- **Three operating modes**: check, generate, and review
-- **DEP-5 format validation**: structural compliance checks (field ordering, whitespace, required fields, etc.)
-- **License mismatch detection**: compares scanner results against declared `debian/copyright` stanzas
-- **Copyright holder auditing**: detects missing authors (new in source but not declared), extra authors (declared but not found in source), with fuzzy matching that normalizes year ranges, `(c)` markers, and whitespace
-- **License text completeness**: verifies standalone License blocks contain full legal text, with special handling for Creative Commons licenses
-- **Automatic license text fetching**: downloads full license text from SPDX and Creative Commons APIs for generate and fix modes (disable with `--no-fetch`)
-- **Non-free / DFSG detection**: flags non-DFSG-compliant licenses (SSPL, BUSL, Elastic, JSON, PolyForm, CC-NC, CC-ND, and more) in all modes
-- **Stanza coverage analysis**: finds source files not matched by any `Files:` glob and stale globs that match no file
-- **License compatibility checks**: detects conflicts like Apache-2.0 + GPL-2-only, EPL-1.0 + GPL, CDDL + GPL, OSL + GPL, QPL + GPL, OpenSSL + GPL, BSD-4-Clause + GPL, and more — checks both declared and detected licenses
-- **False-positive filtering**: classifies autoconf boilerplate, LICENSE text files, and build files to reduce noise
-- **SPDX-to-DEP-5 normalization**: maps 130+ scanner IDs to standard Debian license identifiers, including full GFDL family, all Creative Commons versions (1.0–4.0), and AGPL/EPL/CDDL/OSL families
-- **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, missing copyright holders, fetched license text). Check mode offers to enter fix mode after displaying results
-- **Automatic `debian/*` stanza**: detects the packager's identity from `$DEBFULLNAME`/`$DEBEMAIL`, `git config`, or system user info and proposes a `debian/*` packaging stanza in generate and fix modes, with interactive confirmation and editing. In fix mode, also offers to add the current packager to an existing `debian/*` stanza if not already listed
-- **Progress display**: ScanCode's native progress bar is shown during scanning; file-count progress is displayed during analysis for large scans (200+ files)
+- **Three modes**: check (default), generate, and review
+- **DEP-5 validation**: field ordering, whitespace, required fields
+- **License mismatch detection**: scanner results vs. declared stanzas
+- **Copyright holder auditing**: missing/extra authors with fuzzy matching, Unicode name preservation, and DEP-5-aware `Files: *` handling (proposes precise stanzas instead of polluting the catch-all)
+- **License text completeness**: verifies License blocks have full text
+- **Automatic license fetching**: from SPDX and Creative Commons APIs
+- **Non-free / DFSG detection**: SSPL, BUSL, CC-NC, CC-ND, and more
+- **Coverage analysis**: uncovered files and stale globs
+- **Compatibility checks**: Apache + GPL-2-only, EPL + GPL, CDDL + GPL, etc.
+- **Interactive fix mode**: proposes stanzas, removes stale globs, corrects formatting, adds missing holders and license text
+- **130+ SPDX-to-DEP-5 mappings**: GFDL, Creative Commons 1.0–4.0, AGPL, EPL, CDDL, OSL families
 
 ## Requirements
 
 - `python3`
-- At least one license scanner:
-  - **ScanCode Toolkit** (recommended) — `pip install scancode-toolkit`
-  - **licensecheck** (basic, Debian-native) — `apt install licensecheck`
-- Optionally, **decopy** for additional coverage checks — `apt install python3-decopy`
-- Internet access for automatic license text fetching (optional; use `--no-fetch` to disable)
+- **ScanCode Toolkit** (recommended): `pip install scancode-toolkit`
+- Or **licensecheck** (basic): `apt install licensecheck`
+- Optional: internet access for license text fetching (`--no-fetch` to disable)
 
 ## Usage
 
 ```bash
 chmod +x copyright-audit
-```
 
-### Modes
+# Validate existing debian/copyright
+./copyright-audit [source-dir]
 
-#### check (default)
+# Generate a new copyright file
+./copyright-audit generate -o debian/copyright [source-dir]
 
-Validates an existing `debian/copyright` against the actual source tree. Produces a sectioned report covering DEP-5 format, license mismatches, false positives, license text completeness, compatibility, non-free warnings, detected licenses, stanza coverage, copyright holder accuracy, and files without license headers. If issues are found, offers to enter interactive fix mode.
+# Review for archive upload
+./copyright-audit review [source-dir]
 
-```bash
-./copyright-audit check [options] [source-dir]
-```
-
-#### generate
-
-Scans a source tree and produces a new `debian/copyright` on stdout. Groups files by license/copyright and creates DEP-5 stanzas with a catch-all, per-directory globs, and license text blocks. Full license text is automatically fetched from SPDX/Creative Commons when available; licenses in `/usr/share/common-licenses/` are referenced by path. If no `debian/*` stanza is found, proposes one using the detected packager identity. Warns about non-free licenses and compatibility conflicts.
-
-```bash
-./copyright-audit generate [options] [source-dir]
-./copyright-audit generate -o debian/copyright .
-```
-
-#### review
-
-Produces a structured pass/fail report suitable for archive review, with a final verdict. Checks both declared and detected licenses for compatibility, non-free issues, and copyright holder accuracy.
-
-```bash
-./copyright-audit review [options] [source-dir]
+# Auto-fix all issues
+./copyright-audit --fix --yes [source-dir]
 ```
 
 ### Options
 
 | Option | Description |
 |---|---|
-| `-e, --exclude PATTERN` | Glob pattern to exclude from scan (repeatable) |
-| `-o, --output FILE` | Write generated copyright to FILE (generate mode) |
-| `-f, --fix` | Enter fix mode directly (check mode also offers this after results) |
-| `--yes` | Auto-accept all fixes with `--fix` (no prompts) |
-| `-v, --verbose` | Show all mismatches including likely false positives |
-| `--no-fetch` | Don't download license text from SPDX/CC (use FIXME stubs) |
+| `-e, --exclude PATTERN` | Glob pattern to exclude (repeatable) |
+| `-o, --output FILE` | Output file (generate mode) |
+| `-f, --fix` | Enter interactive fix mode |
+| `--yes` | Auto-accept all fixes (no prompts) |
+| `-v, --verbose` | Include likely false positives |
+| `--no-fetch` | Skip license text downloads |
 | `-j, --jobs N` | Parallel ScanCode workers (default: nproc) |
 | `-h, --help` | Show help |
 
-If `source-dir` is omitted, the current directory is used.
-
-### Examples
-
-```bash
-# Validate debian/copyright in the current source tree
-./copyright-audit
-
-# Generate a new copyright file with auto-fetched license text
-./copyright-audit generate -o debian/copyright /path/to/source
-
-# Generate without network access (FIXME stubs only)
-./copyright-audit generate --no-fetch -o debian/copyright /path/to/source
-
-# Review with exclusions
-./copyright-audit review -e "vendor/*" -e "third_party/*" /path/to/source
-
-# Auto-fix all detected issues
-./copyright-audit check --fix --yes /path/to/source
-
-# Verbose check with 4 scanner jobs
-./copyright-audit check -v -j 4 /path/to/source
-```
-
 ## License
 
-This project is licensed under the GNU General Public License v3.0 or later — see the [LICENSE](LICENSE) file for details.
+GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
