@@ -7,6 +7,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **Three operating modes**: check, generate, and review
 - **DEP-5 format validation**: structural compliance checks (field ordering, whitespace, required fields, etc.)
 - **License mismatch detection**: compares scanner results against declared `debian/copyright` stanzas
+- **Copyright holder auditing**: detects missing authors (new in source but not declared), extra authors (declared but not found in source), with fuzzy matching that normalizes year ranges, `(c)` markers, and whitespace
 - **License text completeness**: verifies standalone License blocks contain full legal text, with special handling for Creative Commons licenses
 - **Automatic license text fetching**: downloads full license text from SPDX and Creative Commons APIs for generate and fix modes (disable with `--no-fetch`)
 - **Non-free / DFSG detection**: flags non-DFSG-compliant licenses (SSPL, BUSL, Elastic, JSON, PolyForm, CC-NC, CC-ND, and more) in all modes
@@ -14,7 +15,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **License compatibility checks**: detects conflicts like Apache-2.0 + GPL-2-only, EPL-1.0 + GPL, CDDL + GPL, OSL + GPL, QPL + GPL, OpenSSL + GPL, BSD-4-Clause + GPL, and more — checks both declared and detected licenses
 - **False-positive filtering**: classifies autoconf boilerplate, LICENSE text files, and build files to reduce noise
 - **SPDX-to-DEP-5 normalization**: maps 130+ scanner IDs to standard Debian license identifiers, including full GFDL family, all Creative Commons versions (1.0–4.0), and AGPL/EPL/CDDL/OSL families
-- **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, fetched license text)
+- **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, missing copyright holders, fetched license text)
 
 ## Requirements
 
@@ -35,7 +36,7 @@ chmod +x copyright-audit
 
 #### check (default)
 
-Validates an existing `debian/copyright` against the actual source tree. Produces a sectioned report covering DEP-5 format, license mismatches, false positives, license text completeness, compatibility, non-free warnings, detected licenses, stanza coverage, and files without license headers.
+Validates an existing `debian/copyright` against the actual source tree. Produces a sectioned report covering DEP-5 format, license mismatches, false positives, license text completeness, compatibility, non-free warnings, detected licenses, stanza coverage, copyright holder accuracy, and files without license headers.
 
 ```bash
 ./copyright-audit check [options] [source-dir]
@@ -52,7 +53,7 @@ Scans a source tree and produces a new `debian/copyright` on stdout. Groups file
 
 #### review
 
-Produces a structured pass/fail report suitable for archive review, with a final verdict. Checks both declared and detected licenses for compatibility and non-free issues.
+Produces a structured pass/fail report suitable for archive review, with a final verdict. Checks both declared and detected licenses for compatibility, non-free issues, and copyright holder accuracy.
 
 ```bash
 ./copyright-audit review [options] [source-dir]
