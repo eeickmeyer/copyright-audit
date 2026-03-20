@@ -216,7 +216,7 @@ export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FIL
 export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR
 
 python3 - "$SCAN_FILE" << 'PYEOF'
-import json, os, re, sys, fnmatch, textwrap
+import json, os, re, sys, fnmatch, textwrap, unicodedata
 from collections import defaultdict, OrderedDict
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -1219,10 +1219,25 @@ def get_declared_copyrights(filepath):
             best = stanza_copyrights.get(glob, [])
     return best
 
+def _strip_email(s):
+    """Remove <email> from a string."""
+    return re.sub(r'\s*<[^>]*>', '', s).strip()
+
+def _extract_email(s):
+    """Extract the first email address from a string, or None."""
+    m = re.search(r'<([^>]+)>', s)
+    return m.group(1).lower() if m else None
+
+def _normalize_unicode(s):
+    """Decompose unicode and strip combining marks (accents)."""
+    nfkd = unicodedata.normalize('NFKD', s)
+    return ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+
 def norm_copyright(s):
     """Normalize a copyright string for fuzzy comparison.
-    Strips year ranges, (c)/(C) markers, 'Copyright' prefix, extra whitespace.
-    Returns None if nothing meaningful remains (prevents empty-string matches)."""
+    Strips year ranges, (c)/(C) markers, 'Copyright' prefix, email addresses,
+    unicode accents, extra whitespace.
+    Returns None if nothing meaningful remains."""
     s = s.strip()
     s = re.sub(r'(?i)copyright\s*', '', s)
     s = re.sub(r'\(c\)', '', s, flags=re.IGNORECASE)
@@ -1230,8 +1245,12 @@ def norm_copyright(s):
     # Remove year ranges: 2020, 2020-2024, 2020 - 2024, etc.
     s = re.sub(r'\d{4}\s*[-–]\s*\d{4}', '', s)
     s = re.sub(r'\d{4}', '', s)
+    # Strip email addresses for comparison
+    s = re.sub(r'\s*<[^>]*>', '', s)
     s = re.sub(r'[,;]\s*', ' ', s)
     s = re.sub(r'\s+', ' ', s).strip()
+    # Normalize unicode (strip accents)
+    s = _normalize_unicode(s)
     result = s.lower()
     return result if result else None
 
@@ -1262,19 +1281,28 @@ def merge_copyrights(raw_list):
     """Merge a list of raw copyright strings, combining years per author.
 
     Returns a list of formatted copyright lines, one per unique author,
-    with years collapsed into ranges.  Each line starts with '(c)'.
-    Example: '(c) 2014-2016, 2020 David Edmundson <dave@kde.org>'
+    with years collapsed into ranges.
+    Example: '2014-2016, 2020 David Edmundson <dave@kde.org>'
     """
     # Group years by normalized author key → keep best-case original author
     author_years = {}    # norm_key → set of years
     author_best = {}     # norm_key → original author string (longest wins)
+    email_to_key = {}    # email → first norm_key seen (for email-based dedup)
     for raw in raw_list:
         if not raw or not raw.strip():
             continue
         years, author = _parse_copyright(raw)
         if not author:
             continue
-        key = author.lower()
+        # Primary key: name without email, unicode-normalized, lowered
+        name_only = _strip_email(author)
+        key = _normalize_unicode(name_only).lower()
+        # Email-based dedup: if two entries share the same email, merge them
+        email = _extract_email(author)
+        if email and email in email_to_key:
+            key = email_to_key[email]
+        elif email:
+            email_to_key[email] = key
         if key not in author_years:
             author_years[key] = set()
             author_best[key] = author
@@ -2747,7 +2775,54 @@ else:
                     print(f"  ✗ Skipped.\n")
 
         # ── Fix 4: Update copyright holders ──────────────────────────
+        # Re-parse stanzas from working_text so holder checking reflects
+        # any stanzas added by Fix 1 (otherwise files still governed by
+        # the catch-all * get holders dumped into the wrong stanza).
+        stanzas_now = []
+        stanza_copyrights_now = {}
+        for para in working_text.split("\n\n"):
+            _files = []
+            _lic = None
+            _cops = []
+            _cf = None
+            for line in para.split("\n"):
+                if line.startswith("Files:"):
+                    rest = line[6:].strip()
+                    if rest:
+                        _files.extend(rest.split())
+                    _cf = "files"
+                elif line.startswith("Copyright:"):
+                    cop_val = line[10:].strip()
+                    if cop_val:
+                        _cops.append(cop_val)
+                    _cf = "copyright"
+                elif line.startswith("License:"):
+                    _lic = line[8:].strip().split()[0] if line[8:].strip() else None
+                    _cf = "license"
+                elif _cf == "files" and line.startswith(" ") and not line.startswith(" ."):
+                    _files.extend(line.strip().split())
+                elif _cf == "copyright" and line.startswith(" ") and line.strip():
+                    _cops.append(line.strip())
+            if _files and _lic:
+                for f in _files:
+                    stanzas_now.append((f, _lic))
+                    stanza_copyrights_now[f] = _cops
+
+        # Temporarily swap in the refreshed stanzas for holder checking
+        _saved_stanzas = stanzas[:]
+        _saved_cops = dict(stanza_copyrights)
+        stanzas.clear()
+        stanzas.extend(stanzas_now)
+        stanza_copyrights.clear()
+        stanza_copyrights.update(stanza_copyrights_now)
+
         missing_holders, extra_holders = check_copyright_holders()
+
+        # Restore originals
+        stanzas.clear()
+        stanzas.extend(_saved_stanzas)
+        stanza_copyrights.clear()
+        stanza_copyrights.update(_saved_cops)
         if missing_holders:
             print(f"{len(missing_holders)} copyright holder(s) detected but not declared:\n")
             # Group by glob pattern for cleaner prompts
@@ -2781,20 +2856,24 @@ else:
                                     if m:
                                         existing_indent = m.group(1)
                                         break
-                                # Filter out holders already present in the copyright block
-                                existing_text = cop_m.group(0)
-                                existing_norms = set()
-                                for cl in existing_text.split('\n'):
-                                    nc = norm_copyright(cl.strip())
-                                    if nc:
-                                        existing_norms.add(nc)
-                                new_holders = [h for h in cleaned
-                                               if not any(norm_copyright(h) in en or en in norm_copyright(h)
-                                                          for en in existing_norms)]
-                                if new_holders:
-                                    old = fm.group(0) + cop_m.group(0)
-                                    new = old + "\n" + _copyright_continuations(new_holders, indent=existing_indent)
-                                    working_text = working_text.replace(old, new, 1)
+                                # Collect existing copyright lines from the stanza
+                                existing_raw = []
+                                for cl in cop_lines:
+                                    cl = cl.strip()
+                                    if cl.startswith("Copyright:"):
+                                        cl = cl[len("Copyright:"):].strip()
+                                    if cl:
+                                        existing_raw.append(cl)
+                                # Merge existing + new holders together (dedup + year merge)
+                                combined = existing_raw + cleaned
+                                merged = merge_copyrights(combined)
+                                # Check if merged result differs from existing
+                                old_merged = merge_copyrights(existing_raw)
+                                if merged != old_merged:
+                                    old_block = fm.group(0) + cop_m.group(0)
+                                    new_cop = "Copyright: " + format_copyright_field(merged)
+                                    new_block = fm.group(0) + "\n" + new_cop
+                                    working_text = working_text.replace(old_block, new_block, 1)
                                     changes_made += 1
                                     found = True
                                     print(f"  ✓ Added.\n")
