@@ -131,7 +131,8 @@ _WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$_WORKDIR"' EXIT
 
 # ── Default exclusions for VCS / build artifacts ─────────────────────
-DEFAULT_EXCLUDES=(".git/*" ".svn/*" ".hg/*" "node_modules/*" "__pycache__/*"
+DEFAULT_EXCLUDES=(".git" ".git/*" ".svn" ".svn/*" ".hg" ".hg/*"
+    "node_modules/*" "__pycache__/*"
     ".tox/*" "*.pyc" ".eggs/*" "*.egg-info/*" "_build/*" "build/*")
 for _pat in "${DEFAULT_EXCLUDES[@]}"; do
     EXCLUDE_PATTERNS+=("$_pat")
@@ -326,6 +327,9 @@ excludes = [p for p in exclude_raw.split("\n") if p]
 
 def is_excluded(filepath):
     fp = filepath.lstrip("./")
+    # Always exclude VCS internals even if not in the exclude list
+    if fp == ".git" or fp.startswith(".git/"):
+        return True
     return any(fnmatch.fnmatch(fp, pat) for pat in excludes)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -489,10 +493,20 @@ MIN_CONFIDENCE = 50  # Minimum ScanCode match score to trust
 if scanner == "scancode":
     with open(scan_file, encoding="utf-8") as f:
         data = json.load(f)
+    # ScanCode scanning "." prefixes all paths with the directory basename.
+    # Detect and strip this prefix so paths are relative to the source root.
+    _sc_prefix = ""
+    for entry in data.get("files", []):
+        if entry.get("type") == "directory":
+            _sc_prefix = entry["path"] + "/"
+            break
     for entry in data.get("files", []):
         if entry.get("type") != "file":
             continue
-        path = "./" + entry["path"].lstrip("./")
+        _raw_path = entry["path"]
+        if _sc_prefix and _raw_path.startswith(_sc_prefix):
+            _raw_path = _raw_path[len(_sc_prefix):]
+        path = "./" + _raw_path.lstrip("./")
         if is_excluded(path):
             continue
         # Skip symlinks
@@ -513,14 +527,14 @@ if scanner == "scancode":
                 continue
             spdx = det.get("license_expression_spdx", "") or ""
             if spdx:
-                # Split compound expressions
-                for part in re.split(r'\s+AND\s+|\s+OR\s+', spdx):
+                # Split compound expressions (AND / OR / WITH)
+                for part in re.split(r'\s+AND\s+|\s+OR\s+|\s+WITH\s+', spdx):
                     part = part.strip("() ")
                     if part and not part.startswith("LicenseRef-scancode-"):
                         lics.append(part)
             else:
                 expr = det.get("license_expression", "") or ""
-                for part in re.split(r'\s+AND\s+|\s+OR\s+', expr, flags=re.IGNORECASE):
+                for part in re.split(r'\s+AND\s+|\s+OR\s+|\s+WITH\s+', expr, flags=re.IGNORECASE):
                     part = part.strip("() ")
                     if part and not part.lower().startswith("licenseref-scancode-"):
                         lics.append(part)
@@ -1287,19 +1301,25 @@ def check_copyright_holders():
       missing: [(filepath, detected_holder)] — detected but not declared
       extra: [(glob, declared_holder)] — declared but not found in any scanned file
     """
-    # Build map: for each glob, collect all detected copyright holders
+    # In DEP-5, when multiple stanzas match a file, the last one wins.
+    # Map each file's copyrights only to its governing stanza.
     detected_per_glob = defaultdict(set)
     declared_per_glob = {}
-    scanned_paths = set(r["path"].lstrip("./") for r in scan_results)
 
     for glob_pat, lic in stanzas:
         declared_per_glob[glob_pat] = set(stanza_copyrights.get(glob_pat, []))
-        for r in scan_results:
-            fp = r["path"].lstrip("./")
-            if fnmatch.fnmatch(fp, glob_pat):
-                for c in r.get("copyrights", []):
-                    if c:
-                        detected_per_glob[glob_pat].add(c)
+
+    # For each scanned file, find its governing stanza (last match wins)
+    for r in scan_results:
+        fp = r["path"].lstrip("./")
+        governing_glob = None
+        for glob_pat, lic in stanzas:
+            if fnmatch.fnmatch(fp, glob_pat) or glob_pat == "*":
+                governing_glob = glob_pat
+        if governing_glob is not None:
+            for c in r.get("copyrights", []):
+                if c:
+                    detected_per_glob[governing_glob].add(c)
 
     missing_holders = []  # (glob, detected_holder_not_declared)
     extra_holders = []    # (glob, declared_holder_not_detected)
@@ -1466,22 +1486,21 @@ def is_nonfree(license_id):
 # MODE: generate — build a debian/copyright from scan results
 # ══════════════════════════════════════════════════════════════════════
 if mode == "generate":
-    # Group files by license only (copyrights are merged within each group).
-    # This avoids duplicate stanzas for the same directory with different
-    # copyright holders — the DEP-5 way is one stanza per dir/* glob with
-    # all copyright holders listed together.
-    groups = defaultdict(lambda: {"files": [], "copyrights": set()})
+    # Collect per-file data: each entry has path, license key, copyrights.
+    file_entries = []
     for idx, r in enumerate(scan_results, 1):
         progress(idx, total_files, "Grouping")
         if not r["licenses"]:
             continue
         lic_key = tuple(sorted(set(to_dep5(l) for l in r["licenses"])))
-        groups[lic_key]["files"].append(r["path"].lstrip("./"))
-        for c in r["copyrights"]:
-            groups[lic_key]["copyrights"].add(c)
+        fp = r["path"].lstrip("./")
+        file_entries.append({"path": fp, "lic": lic_key, "cops": list(r["copyrights"])})
 
-    # Find the most common license group for the catch-all
-    biggest_key = max(groups, key=lambda k: len(groups[k]["files"]))
+    # Count files per license to pick the catch-all license
+    lic_counts = defaultdict(int)
+    for e in file_entries:
+        lic_counts[e["lic"]] += 1
+    biggest_key = max(lic_counts, key=lambda k: lic_counts[k])
 
     # Build compact directory-level globs for a set of paths.
     # Always prefer dir/* when any files in that directory appear in the group.
@@ -1506,6 +1525,22 @@ if mode == "generate":
             deduped.append(g)
         return deduped
 
+    # ── Build per-directory stanza groups ────────────────────────────
+    # Key: (lic_key, directory) → copyrights set.
+    # Root-level files with the catch-all license go into Files: *.
+    # Everything else gets its own stanza.
+    dir_groups = defaultdict(lambda: {"paths": [], "cops": set()})
+    root_catchall_cops = set()
+    for e in file_entries:
+        d = str(Path(e["path"]).parent)
+        if e["lic"] == biggest_key and d == ".":
+            # Root-level files with the dominant license → catch-all
+            root_catchall_cops.update(e["cops"])
+        else:
+            key = (e["lic"], d)
+            dir_groups[key]["paths"].append(e["path"])
+            dir_groups[key]["cops"].update(e["cops"])
+
     out = []
     out.append("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/")
     out.append("Upstream-Name: FIXME")
@@ -1513,37 +1548,49 @@ if mode == "generate":
     out.append("Source: FIXME")
     out.append("")
 
-    # Catch-all stanza
-    lics = biggest_key
-    cops_raw = sorted(groups[biggest_key]["copyrights"])
-    merged_cops = merge_copyrights(cops_raw)
+    # Catch-all stanza — only root-level copyrights for the dominant license.
+    # If no root-level files have copyright info, use the packager identity.
+    merged_cops = merge_copyrights(sorted(root_catchall_cops))
+    if not merged_cops:
+        _catchall_cop = ""
+        if packager_name or packager_email:
+            parts = []
+            if packager_year:
+                parts.append(packager_year)
+            if packager_name:
+                parts.append(packager_name)
+            if packager_email:
+                parts.append(f"<{packager_email}>")
+            _catchall_cop = " ".join(parts)
+        merged_cops = [_catchall_cop] if _catchall_cop else []
     out.append("Files: *")
     out.append("Copyright: " + format_copyright_field(merged_cops))
-    out.append("License: " + " AND ".join(lics))
+    out.append("License: " + " AND ".join(biggest_key))
     out.append("")
 
-    # Directories already covered by the catch-all — track to avoid duplicates
-    catchall_dirs = set()
-    for p in groups[biggest_key]["files"]:
-        catchall_dirs.add(str(Path(p).parent))
-
-    # Other stanzas (sorted by license then path)
-    for key in sorted(groups.keys()):
-        if key == biggest_key:
-            continue
-        lics = key
-        grp = groups[key]
-        cops_raw = sorted(grp["copyrights"])
-        merged_cops = merge_copyrights(cops_raw)
+    # ── Merge dir_groups that share the same license + copyrights ────
+    # Consolidate directories with identical (license, copyright set) into
+    # a single stanza with multiple dir/* globs.
+    stanza_map = defaultdict(list)  # (lic_key, frozenset(cops)) → [paths]
+    for (lic_key, d), grp in dir_groups.items():
         # Exclude debian/ files — a dedicated debian/* stanza is always proposed
-        paths = sorted(p for p in grp["files"] if not p.startswith("debian/"))
+        paths = [p for p in grp["paths"] if not p.startswith("debian/")]
         if not paths:
             continue
+        sk = (lic_key, frozenset(grp["cops"]))
+        stanza_map[sk].extend(paths)
+
+    # Other stanzas (sorted by license then first path for stable output)
+    for sk in sorted(stanza_map, key=lambda k: (k[0], sorted(stanza_map[k])[0])):
+        lic_key, cops_frozen = sk
+        paths = sorted(stanza_map[sk])
+        cops_raw = sorted(cops_frozen)
+        merged_cops = merge_copyrights(cops_raw)
         globs = make_glob(paths)
 
         out.append("Files: " + "\n       ".join(globs))
         out.append("Copyright: " + format_copyright_field(merged_cops))
-        out.append("License: " + " AND ".join(lics))
+        out.append("License: " + " AND ".join(lic_key))
         out.append("")
 
     # ── debian/* packaging stanza ─────────────────────────────────
@@ -1620,8 +1667,9 @@ if mode == "generate":
 
     # License text stubs
     all_lics = set()
-    for lics_tuple in groups:
-        all_lics.update(lics_tuple)
+    all_lics.update(biggest_key)
+    for (lic_key, _cops_fs) in stanza_map:
+        all_lics.update(lic_key)
     if deb_lic_added:
         all_lics.add(deb_lic_added)
 
@@ -1698,9 +1746,9 @@ if mode == "generate":
 
     # Summary to stderr
     print(f"\n  Files scanned:  {len(scan_results)}", file=sys.stderr)
-    print(f"  License groups: {len(groups)}", file=sys.stderr)
+    print(f"  License groups: {len(set(k[0] for k in stanza_map)) + 1}", file=sys.stderr)
     print(f"  Unique licenses: {len(all_lics)}", file=sys.stderr)
-    print(f"  Stanzas (excl. catch-all): {len(groups) - 1}", file=sys.stderr)
+    print(f"  Stanzas (excl. catch-all): {len(stanza_map)}", file=sys.stderr)
     if fetched_count:
         print(f"  License texts fetched: {fetched_count}", file=sys.stderr)
     unfetched = len(all_lics) - fetched_count - len(all_lics & COMMON_LICENSES)
@@ -2249,16 +2297,19 @@ else:
     # Offer to enter fix mode if issues were found and --fix wasn't given
     fixable_dep5_count = sum(1 for i in dep5_issues if i[3] is not None)
     if not fix_mode and (total_issues > 0 or fixable_dep5_count > 0) and copyright_file:
-        try:
-            _offer_tty = open("/dev/tty", "r")
-            sys.stdout.write("  Run interactive fix mode now? [y/N] ")
-            sys.stdout.flush()
-            offer_ans = _offer_tty.readline().rstrip("\n").strip().lower()
-            _offer_tty.close()
-            if offer_ans in ("y", "yes"):
-                fix_mode = True
-        except OSError:
-            pass
+        if yes_mode:
+            fix_mode = True
+        elif sys.stderr.isatty():
+            try:
+                _offer_tty = open("/dev/tty", "r")
+                sys.stderr.write("  Run interactive fix mode now? [y/N] ")
+                sys.stderr.flush()
+                offer_ans = _offer_tty.readline().rstrip("\n").strip().lower()
+                _offer_tty.close()
+                if offer_ans in ("y", "yes"):
+                    fix_mode = True
+            except OSError:
+                pass
 
     # ══════════════════════════════════════════════════════════════════
     # Interactive fix mode
@@ -2585,8 +2636,10 @@ else:
                 by_glob[glob_pat].append(holder)
 
             for glob_pat, holders in sorted(by_glob.items()):
+                # Clean holders: strip Copyright/(C) prefix, merge years
+                cleaned = merge_copyrights(holders)
                 print(f"  Stanza: Files: {glob_pat}")
-                for h in holders:
+                for h in cleaned:
                     print(f"    + {h}")
                 answer = ask(f"  Add missing holder(s) to this stanza? [y/N] ").strip().lower()
                 if answer in ("y", "yes"):
@@ -2597,7 +2650,7 @@ else:
                     m = re.search(pat, working_text)
                     if m:
                         old = m.group(0)
-                        addition = "\n           ".join(holders)
+                        addition = "\n           ".join(cleaned)
                         new = old + "\n           " + addition
                         working_text = working_text.replace(old, new, 1)
                         changes_made += 1
