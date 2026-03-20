@@ -2075,10 +2075,23 @@ else:
         print(f"\n  RESULT: {total_issues} item(s) may need attention.")
     print()
 
+    # Offer to enter fix mode if issues were found and --fix wasn't given
+    fixable_dep5_count = sum(1 for i in dep5_issues if i[3] is not None)
+    if not fix_mode and (total_issues > 0 or fixable_dep5_count > 0) and copyright_file:
+        try:
+            _offer_tty = open("/dev/tty", "r")
+            sys.stdout.write("  Run interactive fix mode now? [y/N] ")
+            sys.stdout.flush()
+            offer_ans = _offer_tty.readline().rstrip("\n").strip().lower()
+            _offer_tty.close()
+            if offer_ans in ("y", "yes"):
+                fix_mode = True
+        except OSError:
+            pass
+
     # ══════════════════════════════════════════════════════════════════
     # Interactive fix mode
     # ══════════════════════════════════════════════════════════════════
-    fixable_dep5_count = sum(1 for i in dep5_issues if i[3] is not None)
     if fix_mode and (total_issues > 0 or fixable_dep5_count > 0) and copyright_file:
         print("=" * W)
         print("INTERACTIVE FIX MODE")

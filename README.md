@@ -15,8 +15,9 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **License compatibility checks**: detects conflicts like Apache-2.0 + GPL-2-only, EPL-1.0 + GPL, CDDL + GPL, OSL + GPL, QPL + GPL, OpenSSL + GPL, BSD-4-Clause + GPL, and more — checks both declared and detected licenses
 - **False-positive filtering**: classifies autoconf boilerplate, LICENSE text files, and build files to reduce noise
 - **SPDX-to-DEP-5 normalization**: maps 130+ scanner IDs to standard Debian license identifiers, including full GFDL family, all Creative Commons versions (1.0–4.0), and AGPL/EPL/CDDL/OSL families
-- **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, missing copyright holders, fetched license text)
-- **Automatic `debian/*` stanza**: detects the packager's identity from `$DEBFULLNAME`/`$DEBEMAIL`, `git config`, or system user info and proposes a `debian/*` packaging stanza in generate and fix modes, with interactive confirmation and editing
+- **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, missing copyright holders, fetched license text). Check mode offers to enter fix mode after displaying results
+- **Automatic `debian/*` stanza**: detects the packager's identity from `$DEBFULLNAME`/`$DEBEMAIL`, `git config`, or system user info and proposes a `debian/*` packaging stanza in generate and fix modes, with interactive confirmation and editing. In fix mode, also offers to add the current packager to an existing `debian/*` stanza if not already listed
+- **Progress display**: ScanCode's native progress bar is shown during scanning; file-count progress is displayed during analysis for large scans (200+ files)
 
 ## Requirements
 
@@ -37,7 +38,7 @@ chmod +x copyright-audit
 
 #### check (default)
 
-Validates an existing `debian/copyright` against the actual source tree. Produces a sectioned report covering DEP-5 format, license mismatches, false positives, license text completeness, compatibility, non-free warnings, detected licenses, stanza coverage, copyright holder accuracy, and files without license headers.
+Validates an existing `debian/copyright` against the actual source tree. Produces a sectioned report covering DEP-5 format, license mismatches, false positives, license text completeness, compatibility, non-free warnings, detected licenses, stanza coverage, copyright holder accuracy, and files without license headers. If issues are found, offers to enter interactive fix mode.
 
 ```bash
 ./copyright-audit check [options] [source-dir]
@@ -66,7 +67,7 @@ Produces a structured pass/fail report suitable for archive review, with a final
 |---|---|
 | `-e, --exclude PATTERN` | Glob pattern to exclude from scan (repeatable) |
 | `-o, --output FILE` | Write generated copyright to FILE (generate mode) |
-| `-f, --fix` | Interactively fix issues found (check mode only) |
+| `-f, --fix` | Enter fix mode directly (check mode also offers this after results) |
 | `--yes` | Auto-accept all fixes with `--fix` (no prompts) |
 | `-v, --verbose` | Show all mismatches including likely false positives |
 | `--no-fetch` | Don't download license text from SPDX/CC (use FIXME stubs) |
