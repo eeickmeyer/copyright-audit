@@ -9,9 +9,9 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **License mismatch detection**: compares scanner results against declared `debian/copyright` stanzas
 - **License text completeness**: verifies standalone License blocks contain full legal text, with special handling for Creative Commons licenses
 - **Automatic license text fetching**: downloads full license text from SPDX and Creative Commons APIs for generate and fix modes (disable with `--no-fetch`)
-- **Non-free / DFSG detection**: flags non-DFSG-compliant licenses (SSPL, BSL, Elastic, JSON, PolyForm, CC-NC, CC-ND, and more) in all modes
+- **Non-free / DFSG detection**: flags non-DFSG-compliant licenses (SSPL, BUSL, Elastic, JSON, PolyForm, CC-NC, CC-ND, and more) in all modes
 - **Stanza coverage analysis**: finds source files not matched by any `Files:` glob and stale globs that match no file
-- **License compatibility checks**: detects conflicts like Apache-2.0 + GPL-2-only, EPL-1.0 + GPL, CDDL + GPL, OSL + GPL, QPL + GPL, and more — checks both declared and detected licenses
+- **License compatibility checks**: detects conflicts like Apache-2.0 + GPL-2-only, EPL-1.0 + GPL, CDDL + GPL, OSL + GPL, QPL + GPL, OpenSSL + GPL, BSD-4-Clause + GPL, and more — checks both declared and detected licenses
 - **False-positive filtering**: classifies autoconf boilerplate, LICENSE text files, and build files to reduce noise
 - **SPDX-to-DEP-5 normalization**: maps 130+ scanner IDs to standard Debian license identifiers, including full GFDL family, all Creative Commons versions (1.0–4.0), and AGPL/EPL/CDDL/OSL families
 - **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, fetched license text)
