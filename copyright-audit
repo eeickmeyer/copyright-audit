@@ -152,7 +152,7 @@ cd "$SRCDIR"
 
 if [[ "$SCANNER" == "scancode" ]]; then
     echo "Running ScanCode (SPDX database)... this may take several minutes." >&2
-    SC_ARGS=(--license --copyright --json "$_WORKDIR/scancode.json" --quiet)
+    SC_ARGS=(--license --copyright --json "$_WORKDIR/scancode.json")
     if [[ -n "$JOBS" ]]; then
         SC_ARGS+=(-n "$JOBS")
     fi
@@ -160,9 +160,11 @@ if [[ "$SCANNER" == "scancode" ]]; then
     for _pat in "${EXCLUDE_PATTERNS[@]}"; do
         SC_ARGS+=(--ignore "$_pat")
     done
-    if ! scancode "${SC_ARGS[@]}" . 2>"$_WORKDIR/scancode.err"; then
-        echo "Warning: ScanCode exited with errors (see below). Results may be incomplete." >&2
-        head -20 "$_WORKDIR/scancode.err" >&2
+    # ScanCode needs a real TTY on stderr for its progress bar.
+    # Let stderr go straight to the terminal; capture exit status only.
+    scancode "${SC_ARGS[@]}" . ; _sc_rc=$?
+    if [[ $_sc_rc -ne 0 ]]; then
+        echo "Warning: ScanCode exited with code $_sc_rc. Results may be incomplete." >&2
     fi
     SCAN_FILE="$_WORKDIR/scancode.json"
 else
@@ -576,6 +578,21 @@ else:
 
 # Skip symlinks in licensecheck results too
 scan_results = [r for r in scan_results if not os.path.islink(r["path"].lstrip("./"))]
+
+total_files = len(scan_results)
+print(f"  {total_files} files to analyze.", file=sys.stderr)
+
+def progress(current, total, label="Analyzing"):
+    """Print a progress update to stderr (overwriting current line)."""
+    if total < 200:
+        return  # not worth showing for small scans
+    if current % 500 == 0 or current == total:
+        pct = current * 100 // total
+        sys.stderr.write(f"\r  {label}: {current}/{total} ({pct}%)")
+        sys.stderr.flush()
+        if current == total:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
 
 # ══════════════════════════════════════════════════════════════════════
 # Parse existing debian/copyright
@@ -1287,7 +1304,8 @@ def is_nonfree(license_id):
 if mode == "generate":
     # Group files by (frozenset(licenses), frozenset(copyrights))
     groups = defaultdict(list)
-    for r in scan_results:
+    for idx, r in enumerate(scan_results, 1):
+        progress(idx, total_files, "Grouping")
         if not r["licenses"]:
             continue
         key = (tuple(sorted(set(to_dep5(l) for l in r["licenses"]))),
@@ -1544,7 +1562,8 @@ no_license = []
 apache_files = []
 all_scan_licenses = defaultdict(int)
 
-for r in scan_results:
+for idx, r in enumerate(scan_results, 1):
+    progress(idx, total_files, "Classifying")
     fp = r["path"]
     if not r["licenses"]:
         no_license.append(fp)
