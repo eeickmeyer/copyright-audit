@@ -16,6 +16,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **False-positive filtering**: classifies autoconf boilerplate, LICENSE text files, and build files to reduce noise
 - **SPDX-to-DEP-5 normalization**: maps 130+ scanner IDs to standard Debian license identifiers, including full GFDL family, all Creative Commons versions (1.0–4.0), and AGPL/EPL/CDDL/OSL families
 - **Interactive fix mode**: proposes and applies fixes to `debian/copyright` (new stanzas, stale glob removal, format corrections, missing copyright holders, fetched license text)
+- **Automatic `debian/*` stanza**: detects the packager's identity from `$DEBFULLNAME`/`$DEBEMAIL`, `git config`, or system user info and proposes a `debian/*` packaging stanza in generate and fix modes, with interactive confirmation and editing
 
 ## Requirements
 
@@ -44,7 +45,7 @@ Validates an existing `debian/copyright` against the actual source tree. Produce
 
 #### generate
 
-Scans a source tree and produces a new `debian/copyright` on stdout. Groups files by license/copyright and creates DEP-5 stanzas with a catch-all, per-directory globs, and license text blocks. Full license text is automatically fetched from SPDX/Creative Commons when available; licenses in `/usr/share/common-licenses/` are referenced by path. Warns about non-free licenses and compatibility conflicts.
+Scans a source tree and produces a new `debian/copyright` on stdout. Groups files by license/copyright and creates DEP-5 stanzas with a catch-all, per-directory globs, and license text blocks. Full license text is automatically fetched from SPDX/Creative Commons when available; licenses in `/usr/share/common-licenses/` are referenced by path. If no `debian/*` stanza is found, proposes one using the detected packager identity. Warns about non-free licenses and compatibility conflicts.
 
 ```bash
 ./copyright-audit generate [options] [source-dir]
