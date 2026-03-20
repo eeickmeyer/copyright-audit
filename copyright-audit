@@ -1,5 +1,5 @@
 #!/bin/bash
-# copyright-check.sh — Debian copyright file generator, checker, and reviewer
+# copyright-audit — Debian copyright file generator, checker, and reviewer
 #
 # Copyright (C) 2026 Erich Eickmeyer
 #

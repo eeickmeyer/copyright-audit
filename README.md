@@ -28,7 +28,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 ## Usage
 
 ```bash
-chmod +x copyright-audit.sh
+chmod +x copyright-audit
 ```
 
 ### Modes
@@ -38,7 +38,7 @@ chmod +x copyright-audit.sh
 Validates an existing `debian/copyright` against the actual source tree. Produces a sectioned report covering DEP-5 format, license mismatches, false positives, license text completeness, compatibility, non-free warnings, detected licenses, stanza coverage, and files without license headers.
 
 ```bash
-./copyright-audit.sh check [options] [source-dir]
+./copyright-audit check [options] [source-dir]
 ```
 
 #### generate
@@ -46,8 +46,8 @@ Validates an existing `debian/copyright` against the actual source tree. Produce
 Scans a source tree and produces a new `debian/copyright` on stdout. Groups files by license/copyright and creates DEP-5 stanzas with a catch-all, per-directory globs, and license text blocks. Full license text is automatically fetched from SPDX/Creative Commons when available; licenses in `/usr/share/common-licenses/` are referenced by path. Warns about non-free licenses and compatibility conflicts.
 
 ```bash
-./copyright-audit.sh generate [options] [source-dir]
-./copyright-audit.sh generate -o debian/copyright .
+./copyright-audit generate [options] [source-dir]
+./copyright-audit generate -o debian/copyright .
 ```
 
 #### review
@@ -55,7 +55,7 @@ Scans a source tree and produces a new `debian/copyright` on stdout. Groups file
 Produces a structured pass/fail report suitable for archive review, with a final verdict. Checks both declared and detected licenses for compatibility and non-free issues.
 
 ```bash
-./copyright-audit.sh review [options] [source-dir]
+./copyright-audit review [options] [source-dir]
 ```
 
 ### Options
@@ -77,22 +77,22 @@ If `source-dir` is omitted, the current directory is used.
 
 ```bash
 # Validate debian/copyright in the current source tree
-./copyright-audit.sh
+./copyright-audit
 
 # Generate a new copyright file with auto-fetched license text
-./copyright-audit.sh generate -o debian/copyright /path/to/source
+./copyright-audit generate -o debian/copyright /path/to/source
 
 # Generate without network access (FIXME stubs only)
-./copyright-audit.sh generate --no-fetch -o debian/copyright /path/to/source
+./copyright-audit generate --no-fetch -o debian/copyright /path/to/source
 
 # Review with exclusions
-./copyright-audit.sh review -e "vendor/*" -e "third_party/*" /path/to/source
+./copyright-audit review -e "vendor/*" -e "third_party/*" /path/to/source
 
 # Auto-fix all detected issues
-./copyright-audit.sh check --fix --yes /path/to/source
+./copyright-audit check --fix --yes /path/to/source
 
 # Verbose check with 4 scanner jobs
-./copyright-audit.sh check -v -j 4 /path/to/source
+./copyright-audit check -v -j 4 /path/to/source
 ```
 
 ## License
