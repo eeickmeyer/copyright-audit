@@ -138,6 +138,13 @@ for _pat in "${DEFAULT_EXCLUDES[@]}"; do
     EXCLUDE_PATTERNS+=("$_pat")
 done
 
+# Exclude the copyright file itself (and its .bak) from scanning to
+# prevent a feedback loop where declared holders/licenses get re-detected.
+if [[ -n "$COPYRIGHT_FILE" ]]; then
+    _relcop="${COPYRIGHT_FILE#"$SRCDIR/"}"
+    EXCLUDE_PATTERNS+=("$_relcop" "${_relcop}.bak")
+fi
+
 echo "=== Debian Copyright Tool ===" >&2
 echo "Mode:    $MODE" >&2
 echo "Source:  $SRCDIR" >&2
@@ -1229,9 +1236,11 @@ def _extract_email(s):
     return m.group(1).lower() if m else None
 
 def _normalize_unicode(s):
-    """Decompose unicode and strip combining marks (accents)."""
+    """Decompose unicode and strip combining marks (accents).
+    Also maps ß→ss (not decomposed by NFKD)."""
     nfkd = unicodedata.normalize('NFKD', s)
-    return ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+    result = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+    return result.replace('ß', 'ss').replace('ẞ', 'SS')
 
 def norm_copyright(s):
     """Normalize a copyright string for fuzzy comparison.
@@ -1277,12 +1286,16 @@ def _parse_copyright(s):
     author = re.sub(r'\s+', ' ', author).strip()
     return years, author
 
-def merge_copyrights(raw_list):
+def merge_copyrights(raw_list, prefer_unicode=None):
     """Merge a list of raw copyright strings, combining years per author.
 
     Returns a list of formatted copyright lines, one per unique author,
     with years collapsed into ranges.
     Example: '2014-2016, 2020 David Edmundson <dave@kde.org>'
+
+    If prefer_unicode is a dict mapping norm_key -> author string,
+    any matching author will be replaced with the preferred (non-ASCII)
+    variant.
     """
     # Group years by normalized author key → keep best-case original author
     author_years = {}    # norm_key → set of years
@@ -1307,8 +1320,12 @@ def merge_copyrights(raw_list):
             author_years[key] = set()
             author_best[key] = author
         author_years[key].update(years)
-        # Keep the longest variant (most detail)
-        if len(author) > len(author_best[key]):
+        # Keep the best variant: prefer non-ASCII (proper unicode names)
+        # over ASCII-only, then longest among same category.
+        def _author_score(a):
+            has_nonascii = any(ord(c) > 127 for c in a)
+            return (has_nonascii, len(a))
+        if _author_score(author) > _author_score(author_best[key]):
             author_best[key] = author
 
     def _fmt_years(yrs):
@@ -1326,6 +1343,15 @@ def merge_copyrights(raw_list):
                 start = prev = y
         parts.append(f"{start}-{prev}" if prev > start else str(start))
         return ", ".join(parts)
+
+    # Apply unicode preferences from existing declarations
+    if prefer_unicode:
+        for key in author_best:
+            if key in prefer_unicode:
+                pref = prefer_unicode[key]
+                cur = author_best[key]
+                if any(ord(c) > 127 for c in pref) and not any(ord(c) > 127 for c in cur):
+                    author_best[key] = pref
 
     lines = []
     for key in sorted(author_years, key=lambda k: (
@@ -2823,6 +2849,29 @@ else:
         stanzas.extend(_saved_stanzas)
         stanza_copyrights.clear()
         stanza_copyrights.update(_saved_cops)
+
+        # Build preferred-unicode-names dict from all declared copyrights
+        # so that e.g. "Gräßlin" from one stanza is used everywhere.
+        _unicode_pref = {}
+        _upref_email = {}
+        for _cops_list in stanza_copyrights_now.values():
+            for _cop in _cops_list:
+                _, _auth = _parse_copyright(_cop)
+                if not _auth:
+                    continue
+                _nonly = _strip_email(_auth)
+                _ukey = _normalize_unicode(_nonly).lower()
+                _uemail = _extract_email(_auth)
+                if _uemail and _uemail in _upref_email:
+                    _ukey = _upref_email[_uemail]
+                elif _uemail:
+                    _upref_email[_uemail] = _ukey
+                _has_uni = any(ord(c) > 127 for c in _auth)
+                if _ukey not in _unicode_pref:
+                    _unicode_pref[_ukey] = _auth
+                elif _has_uni and not any(ord(c) > 127 for c in _unicode_pref[_ukey]):
+                    _unicode_pref[_ukey] = _auth
+
         if missing_holders:
             print(f"{len(missing_holders)} copyright holder(s) detected but not declared:\n")
             # Group by glob pattern for cleaner prompts
@@ -2832,7 +2881,7 @@ else:
 
             for glob_pat, holders in sorted(by_glob.items()):
                 # Clean holders: strip Copyright/(C) prefix, merge years
-                cleaned = merge_copyrights(holders)
+                cleaned = merge_copyrights(holders, prefer_unicode=_unicode_pref)
                 print(f"  Stanza: Files: {glob_pat}")
                 for h in cleaned:
                     print(f"    + {h}")
@@ -2866,9 +2915,9 @@ else:
                                         existing_raw.append(cl)
                                 # Merge existing + new holders together (dedup + year merge)
                                 combined = existing_raw + cleaned
-                                merged = merge_copyrights(combined)
+                                merged = merge_copyrights(combined, prefer_unicode=_unicode_pref)
                                 # Check if merged result differs from existing
-                                old_merged = merge_copyrights(existing_raw)
+                                old_merged = merge_copyrights(existing_raw, prefer_unicode=_unicode_pref)
                                 if merged != old_merged:
                                     old_block = fm.group(0) + cop_m.group(0)
                                     new_cop = "Copyright: " + format_copyright_field(merged)
