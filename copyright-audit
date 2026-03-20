@@ -557,12 +557,14 @@ scan_results = [r for r in scan_results if not os.path.islink(r["path"].lstrip("
 # Parse existing debian/copyright
 # ══════════════════════════════════════════════════════════════════════
 stanzas = []  # [(glob, license_id)]
+stanza_copyrights = {}  # {glob: [copyright_holder_strings]}
 if copyright_file and os.path.isfile(copyright_file):
     with open(copyright_file, encoding="utf-8") as f:
         copyright_text = f.read()
     for para in copyright_text.split("\n\n"):
         files = []
         lic = None
+        cops = []
         current_field = None  # Track which field continuation lines belong to
         for line in para.split("\n"):
             if line.startswith("Files:"):
@@ -571,15 +573,22 @@ if copyright_file and os.path.isfile(copyright_file):
                     files.extend(rest.split())
                 current_field = "files"
             elif line.startswith("Copyright:"):
+                cop_val = line[10:].strip()
+                if cop_val:
+                    cops.append(cop_val)
                 current_field = "copyright"
             elif line.startswith("License:"):
                 lic = line[8:].strip().split()[0] if line[8:].strip() else None
                 current_field = "license"
             elif current_field == "files" and line.startswith(" ") and not line.startswith(" ."):
                 files.extend(line.strip().split())
+            elif current_field == "copyright" and line.startswith(" ") and line.strip():
+                # Continuation line for Copyright (additional holders)
+                cops.append(line.strip())
         if files and lic:
             for f in files:
                 stanzas.append((f, lic))
+                stanza_copyrights[f] = cops
 
 # Also parse standalone License text blocks
 license_blocks = {}  # {license_name: text_body}
@@ -1060,6 +1069,75 @@ def get_declared_license(filepath):
             best = lic
     return best
 
+def get_declared_copyrights(filepath):
+    """Return the copyright holders declared for filepath (last-match-wins)."""
+    fp = filepath.lstrip("./")
+    best = []
+    for glob, lic in stanzas:
+        if fnmatch.fnmatch(fp, glob) or glob == "*":
+            best = stanza_copyrights.get(glob, [])
+    return best
+
+def norm_copyright(s):
+    """Normalize a copyright string for fuzzy comparison.
+    Strips year ranges, (c)/(C) markers, 'Copyright' prefix, extra whitespace."""
+    s = s.strip()
+    s = re.sub(r'(?i)copyright\s*', '', s)
+    s = re.sub(r'\(c\)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'©', '', s)
+    # Remove year ranges: 2020, 2020-2024, 2020 - 2024, etc.
+    s = re.sub(r'\d{4}\s*[-–]\s*\d{4}', '', s)
+    s = re.sub(r'\d{4}', '', s)
+    s = re.sub(r'[,;]\s*', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s.lower()
+
+def check_copyright_holders():
+    """Compare detected copyright holders against declared ones per stanza.
+    Returns: (missing, extra)
+      missing: [(filepath, detected_holder)] — detected but not declared
+      extra: [(glob, declared_holder)] — declared but not found in any scanned file
+    """
+    # Build map: for each glob, collect all detected copyright holders
+    detected_per_glob = defaultdict(set)
+    declared_per_glob = {}
+    scanned_paths = set(r["path"].lstrip("./") for r in scan_results)
+
+    for glob_pat, lic in stanzas:
+        declared_per_glob[glob_pat] = set(stanza_copyrights.get(glob_pat, []))
+        for r in scan_results:
+            fp = r["path"].lstrip("./")
+            if fnmatch.fnmatch(fp, glob_pat):
+                for c in r.get("copyrights", []):
+                    if c:
+                        detected_per_glob[glob_pat].add(c)
+
+    missing_holders = []  # (glob, detected_holder_not_declared)
+    extra_holders = []    # (glob, declared_holder_not_detected)
+
+    for glob_pat in declared_per_glob:
+        declared_set = declared_per_glob[glob_pat]
+        detected_set = detected_per_glob.get(glob_pat, set())
+
+        declared_norms = {norm_copyright(d): d for d in declared_set}
+        detected_norms = {norm_copyright(d): d for d in detected_set}
+
+        # Detected but not declared (new authors)
+        for dn, original in detected_norms.items():
+            if not dn:
+                continue
+            if not any(dn in dk or dk in dn for dk in declared_norms):
+                missing_holders.append((glob_pat, original))
+
+        # Declared but not detected (stale authors)
+        for dk, original in declared_norms.items():
+            if not dk:
+                continue
+            if not any(dk in dn or dn in dk for dn in detected_norms):
+                extra_holders.append((glob_pat, original))
+
+    return missing_holders, extra_holders
+
 # ══════════════════════════════════════════════════════════════════════
 # False-positive heuristic
 # ══════════════════════════════════════════════════════════════════════
@@ -1517,7 +1595,23 @@ if mode == "review":
     cov_ok = len(src_uncovered) == 0
     dep5_ok = not dep5_errors
 
-    # Test 11: Decopy findings
+    # Test 11: Copyright holder accuracy
+    missing_holders, extra_holders = check_copyright_holders()
+    cop_total = len(missing_holders) + len(extra_holders)
+    if cop_total == 0:
+        print("[PASS] Copyright holders match detected holders")
+    else:
+        status = "WARN" if not missing_holders else "WARN"
+        print(f"[{status}] Copyright holder mismatches: "
+              f"{len(missing_holders)} missing, {len(extra_holders)} extra")
+        for glob_pat, holder in missing_holders[:3]:
+            print(f"        + {glob_pat}: {holder}")
+        for glob_pat, holder in extra_holders[:3]:
+            print(f"        - {glob_pat}: {holder}")
+        if cop_total > 6:
+            print(f"        ... and {cop_total - 6} more")
+
+    # Test 12: Decopy findings
     if decopy_issues:
         print(f"[INFO] Decopy findings: {len(decopy_issues)} issue(s)")
         for line in decopy_issues[:5]:
@@ -1525,7 +1619,7 @@ if mode == "review":
         if len(decopy_issues) > 5:
             print(f"        ... and {len(decopy_issues) - 5} more")
     
-    # Test 12: Low-confidence detections
+    # Test 13: Low-confidence detections
     if low_confidence:
         print(f"[INFO] Low-confidence license detections skipped: {len(low_confidence)}")
         for path, lic, score in low_confidence[:5]:
@@ -1534,7 +1628,8 @@ if mode == "review":
             print(f"        ... and {len(low_confidence) - 5} more")
 
     if (real_count == 0 and not missing_in_copyright and not nonfree_found
-            and lic_ok and cov_ok and not stale and dep5_ok):
+            and lic_ok and cov_ok and not stale and dep5_ok
+            and not missing_holders):
         print("VERDICT: debian/copyright appears complete and accurate.")
     elif real_count < 10 and not nonfree_found and dep5_ok:
         print("VERDICT: Minor issues — mostly acceptable, review flagged items.")
@@ -1770,10 +1865,40 @@ else:
         print("\nAll files have detectable license headers.")
     print()
 
+    # Copyright holder audit
+    missing_holders, extra_holders = check_copyright_holders()
+    print("=" * W)
+    print("SECTION 8: COPYRIGHT HOLDER ACCURACY")
+    print("=" * W)
+
+    if missing_holders or extra_holders:
+        if missing_holders:
+            print(f"\n{len(missing_holders)} copyright holder(s) detected in source but NOT declared:\n")
+            for glob_pat, holder in missing_holders[:20]:
+                print(f"    {glob_pat}")
+                print(f"      detected: {holder}")
+            if len(missing_holders) > 20:
+                print(f"    ... and {len(missing_holders) - 20} more")
+            print()
+        if extra_holders:
+            print(f"{len(extra_holders)} copyright holder(s) declared but NOT found in source:\n")
+            for glob_pat, holder in extra_holders[:20]:
+                print(f"    {glob_pat}")
+                print(f"      declared: {holder}")
+            if len(extra_holders) > 20:
+                print(f"    ... and {len(extra_holders) - 20} more")
+            print()
+        print("  Tip: Missing holders should be added to the matching Copyright:")
+        print("  field. Extra holders may be from removed code — verify before")
+        print("  removing, as upstream attribution requirements may still apply.")
+    else:
+        print("\nDeclared copyright holders match detected holders.")
+    print()
+
     # Decopy findings (if decopy was run)
     if decopy_issues:
         print("=" * W)
-        print("SECTION 8: DECOPY FINDINGS")
+        print("SECTION 9: DECOPY FINDINGS")
         print("=" * W)
         print(f"\n{len(decopy_issues)} issue(s) reported by decopy:\n")
         for line in decopy_issues[:20]:
@@ -1785,7 +1910,7 @@ else:
     # Low-confidence detections (scancode only)
     if low_confidence:
         print("=" * W)
-        print("SECTION 9: LOW-CONFIDENCE DETECTIONS (skipped)")
+        print("SECTION 10: LOW-CONFIDENCE DETECTIONS (skipped)")
         print("=" * W)
         print(f"\n{len(low_confidence)} detection(s) below confidence threshold "
               f"({MIN_CONFIDENCE}%):\n")
@@ -1997,10 +2122,23 @@ else:
             if answer in ("y", "yes"):
                 for glob_pat, lic in stale:
                     escaped = re.escape(glob_pat)
-                    # Try removing from continuation line
+                    # 1) Remove glob if it's the only entry on a continuation line
                     working_text = re.sub(
-                        r'\n       ' + escaped + r'(?=\n)', '', working_text)
-                    # If it's the sole entry on a Files: line, remove the entire stanza
+                        r'\n +' + escaped + r' *(?=\n)', '', working_text)
+                    # 2) Remove glob when sharing a line with other globs
+                    #    (on Files: line or continuation — just drop the token)
+                    working_text = re.sub(
+                        r'(?<= )' + escaped + r'(?= |\n)', '', working_text)
+                    # 3) Clean up any double-spaces left by token removal
+                    working_text = re.sub(r'(Files: ) +', r'\1', working_text)
+                    working_text = re.sub(r'(?<=\n) {8,}(?=\S)', '       ', working_text)
+                    # 4) If Files: line is now empty, remove the entire stanza
+                    working_text = re.sub(
+                        r'\nFiles: *\n'
+                        r'Copyright:[^\n]*(?:\n +[^\n]+)*\n'
+                        r'License:[^\n]*(?:\n .*)*',
+                        '', working_text)
+                    # 5) If glob was the sole entry, remove the entire stanza
                     working_text = re.sub(
                         r'\nFiles: ' + escaped + r'\n'
                         r'Copyright:[^\n]*(?:\n +[^\n]+)*\n'
@@ -2081,6 +2219,47 @@ else:
                     print(f"  ✓ Added.\n")
                 else:
                     print(f"  ✗ Skipped.\n")
+
+        # ── Fix 4: Update copyright holders ──────────────────────────
+        missing_holders, extra_holders = check_copyright_holders()
+        if missing_holders:
+            print(f"{len(missing_holders)} copyright holder(s) detected but not declared:\n")
+            # Group by glob pattern for cleaner prompts
+            by_glob = defaultdict(list)
+            for glob_pat, holder in missing_holders:
+                by_glob[glob_pat].append(holder)
+
+            for glob_pat, holders in sorted(by_glob.items()):
+                print(f"  Stanza: Files: {glob_pat}")
+                for h in holders:
+                    print(f"    + {h}")
+                answer = ask(f"  Add missing holder(s) to this stanza? [y/N] ").strip().lower()
+                if answer in ("y", "yes"):
+                    escaped_glob = re.escape(glob_pat)
+                    # Find the Copyright field (including continuation lines)
+                    pat = (r'(Files:[^\n]*' + escaped_glob + r'[^\n]*\n'
+                           r'Copyright:[^\n]*(?:\n +[^\n]+)*)')
+                    m = re.search(pat, working_text)
+                    if m:
+                        old = m.group(0)
+                        addition = "\n           ".join(holders)
+                        new = old + "\n           " + addition
+                        working_text = working_text.replace(old, new, 1)
+                        changes_made += 1
+                        print(f"  ✓ Added.\n")
+                    else:
+                        print(f"  ✗ Could not locate stanza (edit manually).\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+
+        if extra_holders:
+            print(f"{len(extra_holders)} copyright holder(s) declared but not detected in source:\n")
+            for glob_pat, holder in extra_holders:
+                print(f"  Stanza: Files: {glob_pat}")
+                print(f"    - {holder}")
+            print()
+            print("  NOTE: Stale holders are NOT auto-removed — upstream attribution")
+            print("  requirements may still apply. Review manually.\n")
 
         # ── Write result ─────────────────────────────────────────────
         if changes_made > 0:
