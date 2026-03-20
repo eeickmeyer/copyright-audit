@@ -202,7 +202,7 @@ if [[ -z "$PACKAGER_EMAIL" ]]; then
     PACKAGER_EMAIL="$(git config --get user.email 2>/dev/null || true)"
 fi
 if [[ -z "$PACKAGER_NAME" ]]; then
-    PACKAGER_NAME="$(getent passwd "$USER" 2>/dev/null | cut -d: -f5 | cut -d, -f1 || true)"
+    PACKAGER_NAME="$(getent passwd "$USER" 2>/dev/null | cut -d: -f5 | cut -d, -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
 fi
 if [[ -z "$PACKAGER_NAME" ]]; then
     PACKAGER_NAME="$USER"
@@ -1104,7 +1104,8 @@ def get_declared_copyrights(filepath):
 
 def norm_copyright(s):
     """Normalize a copyright string for fuzzy comparison.
-    Strips year ranges, (c)/(C) markers, 'Copyright' prefix, extra whitespace."""
+    Strips year ranges, (c)/(C) markers, 'Copyright' prefix, extra whitespace.
+    Returns None if nothing meaningful remains (prevents empty-string matches)."""
     s = s.strip()
     s = re.sub(r'(?i)copyright\s*', '', s)
     s = re.sub(r'\(c\)', '', s, flags=re.IGNORECASE)
@@ -1114,7 +1115,8 @@ def norm_copyright(s):
     s = re.sub(r'\d{4}', '', s)
     s = re.sub(r'[,;]\s*', ' ', s)
     s = re.sub(r'\s+', ' ', s).strip()
-    return s.lower()
+    result = s.lower()
+    return result if result else None
 
 def check_copyright_holders():
     """Compare detected copyright holders against declared ones per stanza.
@@ -1338,7 +1340,10 @@ if mode == "generate":
         if key == biggest_key:
             continue
         lics, cops = key
-        paths = sorted(groups[key])
+        # Exclude debian/ files — a dedicated debian/* stanza is always proposed
+        paths = sorted(p for p in groups[key] if not p.startswith("debian/"))
+        if not paths:
+            continue
         if len(paths) > 20:
             globs = make_glob(paths)
         else:
@@ -1940,6 +1945,14 @@ else:
         print("All Files: globs match at least one file in the source tree.")
         print()
 
+    # Check for missing debian/* stanza
+    has_debian_glob = any(g in ("debian/*", "debian/**") for g, _ in stanzas)
+    if stanzas and not has_debian_glob:
+        print("  WARNING: No debian/* stanza found in debian/copyright.")
+        print("  Packaging files (debian/*) should have their own Files stanza")
+        print("  with the packager's copyright. Use --fix to add one.")
+        print()
+
     print("=" * W)
     print("SECTION 7: FILES WITH NO DETECTED LICENSE")
     print("=" * W)
@@ -2412,10 +2425,13 @@ else:
                             if g in ("debian/*", "debian/**"))
             existing_cops = stanza_copyrights.get(deb_glob, [])
             norm_packager = norm_copyright(packager_cop)
-            packager_found = any(
-                norm_packager in norm_copyright(c) or norm_copyright(c) in norm_packager
-                for c in existing_cops
-            )
+            if norm_packager:
+                packager_found = any(
+                    nc and (norm_packager in nc or nc in norm_packager)
+                    for nc in (norm_copyright(c) for c in existing_cops)
+                )
+            else:
+                packager_found = True  # can't meaningfully compare
             if not packager_found:
                 print(f"Current packager not found in debian/* copyright holders:")
                 print(f"    {packager_cop}\n")
