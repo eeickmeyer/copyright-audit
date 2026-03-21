@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-03-21
+
+### Added
+- Scanner cross-validation: when ScanCode is the primary scanner,
+  licensecheck and decopy are run as sanity checks and discrepancies
+  are reported in both review (Test 19) and check (Section 12) modes
+- Per-file copyright holder attribution tracking to prevent false
+  attribution when a holder is detected in only a subset of a
+  multi-file stanza's files
+
+### Fixed
+- Duplicate stanzas: Fix 1 no longer proposes new stanzas for files
+  already covered by a specific (non-catch-all) stanza
+- Placeholder copyright holders (`Unknown`, `FIXME`, `TODO`, `none`,
+  `n/a`) are now filtered out of merged copyright output
+- KDE `metadata.desktop` files added to metadata globs to prevent
+  them from receiving their own stanzas
+- Comma-separated authors (e.g., "Huw Wilkins, Cory Kontros, and
+  Andrew Wedderburn") are now split into separate copyright lines
+- Copyright year inference: when some authors in a merge have detected
+  years but others do not, the yearless authors inherit peer years;
+  falls back to git history or file modification time when no years
+  are detected at all
+
 ## 2026-03-20
 
 ### Added
