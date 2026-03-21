@@ -175,6 +175,22 @@ if [[ "$SCANNER" == "scancode" ]]; then
         echo "Warning: ScanCode exited with code $_sc_rc. Results may be incomplete." >&2
     fi
     SCAN_FILE="$_WORKDIR/scancode.json"
+
+    # Run licensecheck as a sanity check if available
+    if command -v licensecheck >/dev/null 2>&1; then
+        echo "Running licensecheck as sanity check..." >&2
+        licensecheck -r --deb-machine . 2>/dev/null \
+            | sed 's/[\x00-\x08\x0e-\x1f]//g' \
+            > "$_WORKDIR/licensecheck_sanity.txt" || true
+    fi
+
+    # Run decopy as a sanity check if available and in check/review mode
+    if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1 \
+       && [[ -n "$COPYRIGHT_FILE" ]]; then
+        echo "Running decopy as sanity check..." >&2
+        decopy --mode full --copyright-file "$COPYRIGHT_FILE" --quiet . \
+            > "$_WORKDIR/decopy.txt" 2>&1 || true
+    fi
 else
     echo "Running licensecheck..." >&2
     if ! licensecheck -r --deb-machine . 2>"$_WORKDIR/licensecheck.err" \
@@ -219,8 +235,12 @@ if [[ -z "$PACKAGER_NAME" ]]; then
 fi
 
 PACKAGER_YEAR="$(date +%Y)"
+HAS_SANITY_CHECK="false"
+if [[ "$SCANNER" == "scancode" && -s "$_WORKDIR/licensecheck_sanity.txt" ]]; then
+    HAS_SANITY_CHECK="true"
+fi
 export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FILE OUTPUT
-export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR
+export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR HAS_SANITY_CHECK
 
 python3 - "$SCAN_FILE" << 'PYEOF'
 import json, os, re, sys, fnmatch, textwrap, unicodedata, glob as globmod
@@ -242,6 +262,7 @@ no_fetch = os.environ.get("NO_FETCH", "false") == "true"
 packager_name = os.environ.get("PACKAGER_NAME", "")
 packager_email = os.environ.get("PACKAGER_EMAIL", "")
 packager_year = os.environ.get("PACKAGER_YEAR", "")
+has_sanity_check = os.environ.get("HAS_SANITY_CHECK", "false") == "true"
 
 # ── Detect native Debian packages ─────────────────────────────────────
 # Native packages ("3.0 (native)") have no upstream/debian split, so a
@@ -2256,6 +2277,87 @@ if os.path.isfile(decopy_file):
     except Exception:
         pass
 
+# Load licensecheck sanity-check results if available (scancode primary)
+sanity_results = {}  # path → set of license strings
+sanity_file = os.path.join(os.path.dirname(scan_file), "licensecheck_sanity.txt")
+if has_sanity_check and os.path.isfile(sanity_file):
+    try:
+        with open(sanity_file, encoding="utf-8") as f:
+            sanity_content = f.read()
+        SKIP_LIC = {"UNKNOWN"}
+        for para in sanity_content.split("\n\n"):
+            para = para.strip()
+            if not para.startswith("Files:"):
+                continue
+            lines = para.split("\n")
+            file_lines = []
+            lic_line = None
+            in_files = True
+            for line in lines:
+                if line.startswith("Files:"):
+                    rest = line[6:].strip()
+                    if rest:
+                        file_lines.append(rest)
+                    in_files = True
+                elif line.startswith("Copyright:"):
+                    in_files = False
+                elif line.startswith("License:"):
+                    in_files = False
+                    lic_line = line[8:].strip()
+                elif in_files and line.startswith(" "):
+                    file_lines.append(line.strip())
+            if lic_line and lic_line not in SKIP_LIC:
+                lics = set()
+                for part in re.split(r'\s+and/or\s+', lic_line):
+                    part = part.strip("() ")
+                    base = re.split(r'\s+with\s+', part, flags=re.IGNORECASE)[0].strip()
+                    if base:
+                        lics.add(base)
+                for fp in file_lines:
+                    sanity_results[fp] = lics
+    except Exception:
+        pass
+
+def run_sanity_check():
+    """Cross-validate scancode results against licensecheck findings.
+    Returns list of (path, scancode_lics, licensecheck_lics) tuples where
+    the tools disagree on the detected license family."""
+    if not sanity_results:
+        return []
+
+    # Build lookup from primary scan results
+    primary = {}
+    for r in scan_results:
+        fp = r["path"]
+        primary[fp] = set(r["licenses"])
+
+    discrepancies = []
+    for fp, lc_lics in sanity_results.items():
+        # Normalize path
+        norm = "./" + fp.lstrip("./")
+        sc_lics = primary.get(norm, set())
+        if not sc_lics and not lc_lics:
+            continue
+        # Normalize for comparison: strip versions, lowercase
+        def _family(lic):
+            s = re.sub(r'[- ]\d[\d.]*\+?$', '', lic).strip()
+            return s.lower().replace("-", "").replace("_", "").replace(" ", "")
+        sc_families = {_family(l) for l in sc_lics if l}
+        lc_families = {_family(l) for l in lc_lics if l}
+        # Skip if either found nothing (one tool may not detect headers)
+        if not sc_families or not lc_families:
+            continue
+        # Flag if no overlap at all between the two tools
+        if not sc_families & lc_families:
+            discrepancies.append((
+                norm,
+                ", ".join(sorted(sc_lics)) or "(none)",
+                ", ".join(sorted(lc_lics)) or "(none)",
+            ))
+    return discrepancies
+
+sanity_discrepancies = run_sanity_check()
+
 real_mismatches = defaultdict(list)
 fp_mismatches = defaultdict(list)
 no_license = []
@@ -2549,6 +2651,22 @@ if mode == "review":
             print(f"        ... and {len(dup_files) - 5} more")
     else:
         print("[PASS] No duplicate file declarations")
+
+    # Test 19: Sanity check — cross-validate scancode vs licensecheck
+    if has_sanity_check:
+        if sanity_discrepancies:
+            print(f"[WARN] Scanner cross-validation discrepancies: "
+                  f"{len(sanity_discrepancies)} file(s)")
+            for fp, sc_l, lc_l in sanity_discrepancies[:5]:
+                print(f"        {fp}")
+                print(f"          scancode:     {sc_l}")
+                print(f"          licensecheck: {lc_l}")
+            if len(sanity_discrepancies) > 5:
+                print(f"        ... and {len(sanity_discrepancies) - 5} more")
+        else:
+            print("[PASS] Scanner cross-validation: scancode and licensecheck agree")
+    else:
+        print("[INFO] Scanner cross-validation skipped (licensecheck not available)")
 
     fixme_ok = not fixme_stanzas
     versionless_ok = not versionless
@@ -2870,10 +2988,29 @@ else:
             print(f"  ... and {len(decopy_issues) - 20} more")
         print()
 
+    # Scanner cross-validation (sanity check)
+    if has_sanity_check:
+        print("=" * W)
+        print("SECTION 12: SCANNER CROSS-VALIDATION (sanity check)")
+        print("scancode vs licensecheck — files where tools disagree on license")
+        print("=" * W)
+        if sanity_discrepancies:
+            print(f"\n{len(sanity_discrepancies)} file(s) where scancode and "
+                  f"licensecheck disagree:\n")
+            for fp, sc_l, lc_l in sanity_discrepancies:
+                print(f"  {fp}")
+                print(f"    scancode:     {sc_l}")
+                print(f"    licensecheck: {lc_l}")
+            print()
+            print("  These files may warrant manual inspection.")
+        else:
+            print("\nNo discrepancies — both scanners agree on all files.")
+        print()
+
     # Low-confidence detections (scancode only)
     if low_confidence:
         print("=" * W)
-        print("SECTION 11: LOW-CONFIDENCE DETECTIONS (skipped)")
+        print("SECTION 13: LOW-CONFIDENCE DETECTIONS (skipped)")
         print("=" * W)
         print(f"\n{len(low_confidence)} detection(s) below confidence threshold "
               f"({MIN_CONFIDENCE}%):\n")
@@ -2903,6 +3040,8 @@ else:
     consol_saving = sum(len(g['stanzas']) - 1 for g in consol_groups) if consol_groups else 0
     if consol_groups:
         print(f"  Stanzas consolidatable:                {consol_saving} (in {len(consol_groups)} group(s))")
+    if has_sanity_check:
+        print(f"  Scanner cross-validation discrepancies: {len(sanity_discrepancies)}")
 
     total_issues = real_count + len(src_uncovered) + len(stale) + len(dep5_errors)
     if total_issues == 0:
@@ -3041,14 +3180,29 @@ else:
         # ── Fix 1: Add stanzas for mismatched files ──────────────────
         if real_mismatches:
             # Group mismatched files by detected license, skipping
-            # debian/*, symlinks, and metadata/infrastructure files
-            # (the latter are covered by the Files: * catch-all).
+            # debian/*, symlinks, metadata/infrastructure files
+            # (the latter are covered by the Files: * catch-all),
+            # and files already covered by a specific (non-catch-all)
+            # stanza — those already have an intentional declaration.
+            def _has_specific_stanza(filepath):
+                """True if filepath matches any existing stanza glob other
+                than the '*' catch-all.  Such files should not get a
+                duplicate stanza; the existing declaration is intentional."""
+                fp = filepath.lstrip("./")
+                for glob_pat, _ in stanzas:
+                    if glob_pat == "*":
+                        continue
+                    if fnmatch.fnmatch(fp, glob_pat) or fp == glob_pat:
+                        return True
+                return False
+
             by_license = defaultdict(list)
             for (det, decl), files in real_mismatches.items():
                 filtered = [f for f in files
                             if not f.lstrip("./").startswith("debian/")
                             and not os.path.islink(f.lstrip("./"))
-                            and not is_metadata_file(f)]
+                            and not is_metadata_file(f)
+                            and not _has_specific_stanza(f)]
                 if filtered:
                     by_license[det].extend(filtered)
 
