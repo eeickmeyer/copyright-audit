@@ -794,8 +794,103 @@ for _r in scan_results:
         for _h in _holders:
             if _h not in _img_r["copyrights"]:
                 _img_r["copyrights"].append(_h)
-        if _dep5_lic and not _img_r["licenses"]:
+        if _dep5_lic:
+            if _img_r["licenses"] and _img_r["licenses"] != [_dep5_lic]:
+                print(f"  KDE metadata override: {_img_path}: "
+                      f"{', '.join(_img_r['licenses'])} → {_dep5_lic}",
+                      file=sys.stderr)
             _img_r["licenses"] = [_dep5_lic]
+        _enriched_count += 1
+
+# ── SVG RDF/XML embedded metadata enrichment ─────────────────────────
+# SVG files may embed Creative Commons license info and author details
+# in <metadata> via RDF.  When present this is the *authoritative*
+# declaration for the file and overrides scancode's heuristic detection
+# (which is known to misidentify CC license versions).
+_CC_URL_RE = re.compile(
+    r'https?://creativecommons\.org/licenses/'
+    r'([-a-z]+)/([\d.]+)',
+    re.IGNORECASE,
+)
+_PUBLIC_DOMAIN_URLS = {
+    "http://creativecommons.org/publicdomain/zero/1.0/",
+    "https://creativecommons.org/publicdomain/zero/1.0/",
+    "http://creativecommons.org/publicdomain/mark/1.0/",
+    "https://creativecommons.org/publicdomain/mark/1.0/",
+}
+
+def _cc_url_to_dep5(url):
+    """Convert a Creative Commons license URL to a DEP-5 identifier."""
+    url_lower = url.lower().rstrip("/") + "/"
+    if url_lower.rstrip("/") + "/" in _PUBLIC_DOMAIN_URLS or \
+       url_lower in _PUBLIC_DOMAIN_URLS:
+        if "zero" in url_lower:
+            return "CC0-1.0"
+        return "Public-Domain"
+    m = _CC_URL_RE.search(url)
+    if m:
+        kind = m.group(1).upper()   # e.g. "by-sa" → "BY-SA"
+        ver = m.group(2)            # e.g. "4.0"
+        return f"CC-{kind}-{ver}"
+    return None
+
+for _r in scan_results:
+    _fp = _r["path"].lstrip("./")
+    if not _fp.lower().endswith(".svg"):
+        continue
+    try:
+        _svg_tree = ET.parse(_fp)
+    except (OSError, ET.ParseError):
+        continue
+    _svg_root = _svg_tree.getroot()
+
+    _svg_lic = None
+    _svg_creator = None
+
+    # Walk all elements looking for cc:license and dc:creator
+    _CC_NS = "http://creativecommons.org/ns#"
+    _DC_NS = "http://purl.org/dc/elements/1.1/"
+    _RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+
+    for _el in _svg_root.iter():
+        _tag = _el.tag
+        # cc:license — the rdf:resource attribute has the license URL
+        if _tag == f"{{{_CC_NS}}}license" and not _svg_lic:
+            _lic_url = _el.get(f"{{{_RDF_NS}}}resource", "")
+            if _lic_url:
+                _svg_lic = _cc_url_to_dep5(_lic_url)
+        # cc:License — rdf:about attribute has license URL (fallback)
+        elif _tag == f"{{{_CC_NS}}}License" and not _svg_lic:
+            _lic_url = _el.get(f"{{{_RDF_NS}}}about", "")
+            if _lic_url:
+                _svg_lic = _cc_url_to_dep5(_lic_url)
+        # dc:creator > cc:Agent > dc:title
+        elif _tag == f"{{{_DC_NS}}}creator" and not _svg_creator:
+            _agent = _el.find(f"{{{_CC_NS}}}Agent")
+            if _agent is not None:
+                _title = _agent.find(f"{{{_DC_NS}}}title")
+                if _title is not None and _title.text and _title.text.strip():
+                    _svg_creator = _title.text.strip()
+
+    if not _svg_lic and not _svg_creator:
+        continue
+
+    # License: OVERRIDE scancode's detection — the file's embedded
+    # metadata is authoritative for its own license.
+    if _svg_lic:
+        _old_lics = _r["licenses"]
+        _new_lic = to_dep5(_svg_lic)
+        if _old_lics != [_new_lic]:
+            _r["licenses"] = [_new_lic]
+            if _old_lics:
+                print(f"  SVG metadata override: {_fp}: "
+                      f"{', '.join(_old_lics)} → {_new_lic}",
+                      file=sys.stderr)
+            _enriched_count += 1
+
+    # Copyright holder: add if not already present
+    if _svg_creator and _svg_creator not in _r["copyrights"]:
+        _r["copyrights"].append(_svg_creator)
         _enriched_count += 1
 
 # ── GNOME background-properties XML enrichment ───────────────────────
@@ -843,58 +938,81 @@ if _enriched_count:
 # ══════════════════════════════════════════════════════════════════════
 # Directory license/copyright inheritance
 # ══════════════════════════════════════════════════════════════════════
-# Files with no detected license/copyright inherit from other files
-# in the same directory.  If the directory has none, walk up to parent.
-# This matches DEP-5 globbing semantics: dir/* covers all files in dir.
+# For quilt packages only: files with no detected license/copyright
+# inherit from the dominant license in their directory, but ONLY when
+# a COPYING or LICENSE file exists in the same or parent directory
+# (indicating a subproject).  Native packages skip inheritance
+# entirely — files with no detection fall through to Files: *.
+
+_LICENSE_FILE_NAMES = {
+    "copying", "copying.txt", "copying.md",
+    "license", "license.txt", "license.md", "licence", "licence.txt",
+    "copying.lgpl", "copying.gpl", "copying.bsd", "copying.mit",
+    "copying.lib", "unlicense", "unlicense.txt",
+}
 
 _dir_lic_counts = defaultdict(lambda: defaultdict(int))
 _dir_copyrights = defaultdict(set)
+# Track which directories contain a COPYING/LICENSE file
+_dirs_with_license_file = set()
 for _r in scan_results:
-    if not _r["licenses"]:
-        continue
     _fp = _r["path"].lstrip("./")
     _d = str(Path(_fp).parent)
+    # Check if this file is a license/copying file
+    if Path(_fp).name.lower() in _LICENSE_FILE_NAMES:
+        _dirs_with_license_file.add(_d)
+    if not _r["licenses"]:
+        continue
     _lkey = tuple(sorted(set(to_dep5(l) for l in _r["licenses"])))
     _dir_lic_counts[_d][_lkey] += 1
     for _c in _r["copyrights"]:
         _dir_copyrights[_d].add(_c)
 
+def _dir_has_license_file(d):
+    """Return True if directory *d* or its parent has a COPYING/LICENSE file."""
+    if d in _dirs_with_license_file:
+        return True
+    parent = str(Path(d).parent)
+    if parent != d and parent in _dirs_with_license_file:
+        return True
+    return False
+
 def dir_dominant_license(d):
-    """Return the most common license tuple for directory *d*, walking up."""
-    checked = d
-    while True:
-        if checked in _dir_lic_counts and _dir_lic_counts[checked]:
-            return max(_dir_lic_counts[checked],
-                       key=_dir_lic_counts[checked].get)
-        if checked in ("", "."):
-            return None
-        checked = str(Path(checked).parent)
+    """Return the most common license tuple for directory *d*.
+
+    Only uses licenses detected in the SAME directory."""
+    if d in _dir_lic_counts and _dir_lic_counts[d]:
+        return max(_dir_lic_counts[d],
+                   key=_dir_lic_counts[d].get)
+    return None
 
 def dir_copyrights(d):
-    """Return copyright holders from directory *d*, walking up."""
-    checked = d
-    while True:
-        if checked in _dir_copyrights and _dir_copyrights[checked]:
-            return sorted(_dir_copyrights[checked])
-        if checked in ("", "."):
-            return []
-        checked = str(Path(checked).parent)
+    """Return copyright holders from directory *d* (same-dir only)."""
+    if d in _dir_copyrights and _dir_copyrights[d]:
+        return sorted(_dir_copyrights[d])
+    return []
 
 _inherited_count = 0
-for _r in scan_results:
-    if _r["licenses"]:
-        continue
-    _fp = _r["path"].lstrip("./")
-    _d = str(Path(_fp).parent)
-    _inh = dir_dominant_license(_d)
-    if _inh:
-        _r["licenses"] = list(_inh)
-        _r["_inherited"] = True
-        _inherited_count += 1
-    if not _r["copyrights"]:
-        _icops = dir_copyrights(_d)
-        if _icops:
-            _r["copyrights"] = _icops
+if is_native:
+    print("  Native package — skipping directory license inheritance.",
+          file=sys.stderr)
+else:
+    for _r in scan_results:
+        if _r["licenses"]:
+            continue
+        _fp = _r["path"].lstrip("./")
+        _d = str(Path(_fp).parent)
+        if not _dir_has_license_file(_d):
+            continue
+        _inh = dir_dominant_license(_d)
+        if _inh:
+            _r["licenses"] = list(_inh)
+            _r["_inherited"] = True
+            _inherited_count += 1
+        if not _r["copyrights"]:
+            _icops = dir_copyrights(_d)
+            if _icops:
+                _r["copyrights"] = _icops
 
 if _inherited_count:
     print(f"  {_inherited_count} file(s) inherited license from directory context.",
@@ -1835,7 +1953,8 @@ def _parse_paragraph_stanzas(text):
     """Parse copyright text into paragraph-level stanzas.
 
     Returns list of dicts:
-    [{"files": [str], "cops": [str], "license": str, "para_text": str}]
+    [{"files": [str], "cops": [str], "license": str,
+      "comment": str or None, "para_text": str}]
     Only includes paragraphs that have Files:, Copyright:, and License:.
     """
     result = []
@@ -1843,6 +1962,7 @@ def _parse_paragraph_stanzas(text):
         files = []
         cops = []
         lic = None
+        comment_lines = []
         current_field = None
         for line in para.split("\n"):
             if line.startswith("Files:"):
@@ -1858,15 +1978,22 @@ def _parse_paragraph_stanzas(text):
             elif line.startswith("License:"):
                 lic = line[8:].strip().split()[0] if line[8:].strip() else None
                 current_field = "license"
+            elif line.startswith("Comment:"):
+                comment_lines.append(line[8:].strip())
+                current_field = "comment"
             elif current_field == "files" and line.startswith(" ") and not line.startswith(" ."):
                 files.extend(line.strip().split())
             elif current_field == "copyright" and line.startswith(" ") and line.strip():
                 cops.append(line.strip())
+            elif current_field == "comment" and line.startswith(" "):
+                comment_lines.append(line[1:] if line.startswith(" ") else line)
+        comment = "\n".join(comment_lines) if comment_lines else None
         if files and lic and cops:
             result.append({
                 "files": files,
                 "cops": cops,
                 "license": lic,
+                "comment": comment,
                 "para_text": para,
             })
     return result
@@ -1891,6 +2018,11 @@ def check_consolidation(text=None):
     for ps in para_stanzas:
         # Skip catch-all stanzas
         if ps["files"] == ["*"]:
+            continue
+        # Never consolidate stanzas that have Comment fields — they
+        # carry per-file attribution (provenance URLs, etc.) that
+        # would be lost in a merge.
+        if ps.get("comment"):
             continue
         holder_keys = []
         for c in ps["cops"]:
@@ -1920,6 +2052,81 @@ def check_consolidation(text=None):
                 "merged_cops": merged_cops,
             })
     return consolidatable
+
+def _simplify_file_list(paths, all_dir_counts=None):
+    """Reduce a list of file paths using glob patterns where possible.
+
+    For each directory, if the stanza owns ALL files in that directory,
+    represent them as dir/*.  If *all_dir_counts* is provided (a dict
+    mapping directory → total file count across ALL stanzas), dir/* is
+    only used when the stanza's files in that directory equal the total.
+    This prevents a stanza for one author from claiming dir/* when other
+    authors also have files in the same directory.
+    """
+    dirs = defaultdict(list)
+    for p in paths:
+        d = str(Path(p).parent)
+        dirs[d].append(p)
+
+    all_dirs = set(dirs.keys())
+
+    # Phase 1: collapse leaf directories where we have 2+ files.
+    # Skip directories that have sub-directories in the file list
+    # (dir/* in DEP-5 matches recursively).
+    # Only use dir/* when the stanza owns ALL files in the directory.
+    phase1 = []
+    for d, files in sorted(dirs.items()):
+        has_subdirs = any(od != d and od.startswith(d + "/")
+                         for od in all_dirs)
+        owns_all = True
+        if all_dir_counts and d in all_dir_counts:
+            owns_all = len(files) >= all_dir_counts[d]
+        if d == "." or len(files) < 2 or has_subdirs or not owns_all:
+            phase1.extend(sorted(files))
+        else:
+            phase1.append(d + "/*")
+
+    # Phase 2: merge sibling dir/* globs that share a common prefix.
+    # e.g. src/FooA/*, src/FooB/*, src/FooC/* → src/Foo*/*
+    dir_globs = [g for g in phase1 if g.endswith("/*")]
+    individual = [g for g in phase1 if not g.endswith("/*")]
+
+    # Group dir/* globs by parent directory
+    parent_groups = defaultdict(list)
+    for g in dir_globs:
+        parent = str(Path(g.rstrip("/*")).parent)
+        parent_groups[parent].append(g)
+
+    merged_globs = []
+    for parent, globs in sorted(parent_groups.items()):
+        if len(globs) < 2:
+            merged_globs.extend(globs)
+            continue
+        # Find longest common prefix of the directory names
+        dir_names = [g.rstrip("/*") for g in globs]
+        prefix = os.path.commonprefix(dir_names)
+        # prefix must end at a meaningful boundary and be longer than
+        # just the parent dir + separator
+        min_prefix = parent + "/" if parent != "." else ""
+        if len(prefix) > len(min_prefix) + 1:
+            # Check the proposed glob covers only the intended dirs
+            pattern = prefix + "*/*"
+            # Verify it doesn't accidentally match individual files
+            # that are not part of any dir/* glob in this group
+            merged_globs.append(pattern)
+        else:
+            merged_globs.extend(sorted(globs))
+
+    result = sorted(merged_globs + individual)
+
+    # Deduplicate: if parent/* or parent*/* covers a more specific glob
+    deduped = []
+    for g in result:
+        if any(g != prev and fnmatch.fnmatch(g, prev)
+               for prev in deduped):
+            continue
+        deduped.append(g)
+    return deduped
 
 # ══════════════════════════════════════════════════════════════════════
 # False-positive heuristic
@@ -2125,19 +2332,48 @@ if mode == "generate":
 
     def smart_glob(paths):
         """Use dir/* only when every scanned non-metadata file in a
-        directory belongs to this group; otherwise list individual files."""
+        directory belongs to this group; otherwise list individual files.
+        Then merge sibling dir/* globs sharing a common prefix."""
         dirs = defaultdict(list)
         for p in paths:
             d = str(Path(p).parent)
             dirs[d].append(p)
+        all_dirs = set(dirs.keys())
         result = []
         for d, files in sorted(dirs.items()):
+            # Don't glob a dir if subdirs of it also appear in the
+            # file list — dir/* in DEP-5 matches recursively.
+            has_subdirs = any(od != d and od.startswith(d + "/")
+                             for od in all_dirs)
             if d == ".":
                 result.extend(sorted(files))
-            elif len(files) == dir_file_counts.get(d, 0) and len(files) > 1:
+            elif (len(files) == dir_file_counts.get(d, 0)
+                  and len(files) > 1 and not has_subdirs):
                 result.append(d + "/*")
             else:
                 result.extend(sorted(files))
+
+        # Merge sibling dir/* globs with a common prefix into prefix*/*
+        dir_globs = [g for g in result if g.endswith("/*")]
+        individual = [g for g in result if not g.endswith("/*")]
+        parent_groups = defaultdict(list)
+        for g in dir_globs:
+            parent = str(Path(g.rstrip("/*")).parent)
+            parent_groups[parent].append(g)
+        merged_globs = []
+        for parent, globs in sorted(parent_groups.items()):
+            if len(globs) < 3:
+                merged_globs.extend(globs)
+                continue
+            dir_names = [g.rstrip("/*") for g in globs]
+            prefix = os.path.commonprefix(dir_names)
+            min_prefix = (parent + "/") if parent != "." else ""
+            if len(prefix) > len(min_prefix) + 1:
+                merged_globs.append(prefix + "*/*")
+            else:
+                merged_globs.extend(sorted(globs))
+        result = sorted(merged_globs + individual)
+
         # Deduplicate: if parent/* covers child/*, drop child
         deduped = []
         for g in sorted(result):
@@ -2185,6 +2421,15 @@ if mode == "generate":
             continue
         cops_raw = sorted(set(grp["cops"]))
         merged_cops = merge_copyrights(cops_raw, file_paths=paths)
+
+        if not merged_cops:
+            # No copyright holders detected.  If the license matches the
+            # catch-all, these files are already covered by Files: * — no
+            # stanza needed.  Otherwise emit a stanza for the differing
+            # license with FIXME (user must fill in the real holders).
+            if lic_key == biggest_key:
+                continue
+
         globs = smart_glob(paths)
 
         out.append(format_files_field(globs))
@@ -3346,8 +3591,19 @@ else:
                 cops_raw = sorted(set(grp["cops"]))
                 merged_cops = merge_copyrights(cops_raw, file_paths=files)
                 cop_field = format_copyright_field(merged_cops)
-                # List individual files (no dir/* globs)
-                globs = sorted(f.lstrip("./") for f in files)
+                # Apply glob simplification to file list
+                # Build directory file counts from all stanzas so
+                # dir/* is only used when this stanza owns all files
+                # in the directory.
+                _fix1_dir_counts = defaultdict(int)
+                for _sg, _sl in stanzas:
+                    if _sg == "*" or "*" in _sg:
+                        continue
+                    _sd = str(Path(_sg).parent)
+                    _fix1_dir_counts[_sd] += 1
+                globs = _simplify_file_list(
+                    sorted(f.lstrip("./") for f in files),
+                    all_dir_counts=_fix1_dir_counts)
 
                 print(f"  Proposed stanza ({len(files)} file(s)):")
                 print(f"  ┌──────────────────────────────────────")
@@ -3952,7 +4208,21 @@ else:
                              ).strip().lower()
                 if answer in ("y", "yes"):
                     # Build the merged stanza text
-                    files_str = format_files_field(merged_files)
+                    # Build directory file counts from all stanzas
+                    # so dir/* is only used when the merged stanza
+                    # owns ALL files in the directory.
+                    _fix6_dir_counts = defaultdict(int)
+                    for _ps6 in _parse_paragraph_stanzas(
+                            working_text):
+                        for _f6 in _ps6["files"]:
+                            if _f6 == "*" or "*" in _f6:
+                                continue
+                            _d6 = str(Path(_f6).parent)
+                            _fix6_dir_counts[_d6] += 1
+                    simplified = _simplify_file_list(
+                        merged_files,
+                        all_dir_counts=_fix6_dir_counts)
+                    files_str = format_files_field(simplified)
                     cop_field = format_copyright_field(merged_cops)
                     merged_stanza = (f"{files_str}\n"
                                      f"Copyright: {cop_field}\n"
