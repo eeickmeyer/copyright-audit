@@ -1924,9 +1924,11 @@ def check_copyright_holders():
         declared_set = declared_per_glob[glob_pat]
         detected_set = detected_per_glob.get(glob_pat, set())
 
-        declared_norms = {norm_copyright(d): d for d in declared_set}
+        declared_norms = {norm_copyright(d): d for d in declared_set
+                          if norm_copyright(d)}
         detected_norms = {norm_copyright(d): d for d in detected_set
-                          if _parse_copyright(d)[1].lower().strip()
+                          if norm_copyright(d) and
+                          _parse_copyright(d)[1].lower().strip()
                           not in _placeholder_holders}
 
         # Detected but not declared (new authors)
