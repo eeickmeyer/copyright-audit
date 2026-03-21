@@ -223,7 +223,8 @@ export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FIL
 export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR
 
 python3 - "$SCAN_FILE" << 'PYEOF'
-import json, os, re, sys, fnmatch, textwrap, unicodedata
+import json, os, re, sys, fnmatch, textwrap, unicodedata, glob as globmod
+import xml.etree.ElementTree as ET
 from collections import defaultdict, OrderedDict
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -255,16 +256,38 @@ def _is_native_package():
 is_native = _is_native_package()
 
 # ══════════════════════════════════════════════════════════════════════
+# Built-in license texts for non-SPDX licenses
+# ══════════════════════════════════════════════════════════════════════
+_BUILTIN_LICENSE_TEXTS = {
+    "Unsplash": (
+        "Unsplash License\n"
+        "\n"
+        "Unsplash grants you an irrevocable, nonexclusive, worldwide copyright\n"
+        "license to download, copy, modify, distribute, perform, and use images\n"
+        "from Unsplash for free, including for commercial purposes, without\n"
+        "permission from or attributing the photographer or Unsplash. This\n"
+        "license does not include the right to compile images from Unsplash to\n"
+        "replicate a similar or competing service.\n"
+        "\n"
+        "https://unsplash.com/license"
+    ),
+}
+
+# ══════════════════════════════════════════════════════════════════════
 # License text fetcher — downloads from SPDX or Creative Commons
 # ══════════════════════════════════════════════════════════════════════
 _license_text_cache = {}
 
 def fetch_license_text(license_id):
-    """Fetch full license text from SPDX or Creative Commons.
+    """Fetch full license text from built-in texts, SPDX, or Creative Commons.
 
     Returns the license text as a string, or None if unavailable.
     Results are cached so each license is fetched at most once.
     """
+    # Built-in texts are always available regardless of --no-fetch
+    if license_id in _BUILTIN_LICENSE_TEXTS:
+        return _BUILTIN_LICENSE_TEXTS[license_id]
+
     if no_fetch:
         return None
     if license_id in _license_text_cache:
@@ -364,6 +387,35 @@ def is_excluded(filepath):
     if fp == ".git" or fp.startswith(".git/"):
         return True
     return any(fnmatch.fnmatch(fp, pat) for pat in excludes)
+
+# Patterns for metadata/infrastructure files that should be covered by
+# the Files: * catch-all rather than receiving their own stanzas.
+_METADATA_GLOBS = (
+    "*/metadata.json",
+    "*/contents/screenshot.png",
+    "usr/share/gnome-background-properties/*",
+    "usr/share/plymouth/themes/*/*.plymouth",
+    "etc/*",
+    "po/*",
+)
+_METADATA_BASENAMES = frozenset({
+    "AUTHORS", "COPYING", "COPYING.txt", "NEWS", "README", "README.md",
+    "ChangeLog", "POTFILES.in",
+})
+
+def is_metadata_file(filepath):
+    """Return True if *filepath* is a metadata or infrastructure file
+    that should be covered by the Files: * catch-all stanza rather than
+    getting its own per-file stanza.  These include KDE metadata.json,
+    wallpaper screenshot.png thumbnails, GNOME XML descriptors, packaging
+    boilerplate, configuration files, and translation catalogs."""
+    fp = filepath.lstrip("./")
+    if os.path.basename(fp) in _METADATA_BASENAMES:
+        return True
+    # Symlinks are never the canonical copyright target
+    if os.path.islink(fp):
+        return True
+    return any(fnmatch.fnmatch(fp, pat) for pat in _METADATA_GLOBS)
 
 # ══════════════════════════════════════════════════════════════════════
 # SPDX license ID normalization (maps scanner output -> DEP-5 names)
@@ -478,6 +530,12 @@ SPDX_TO_DEP5 = {
     "ecl-2.0": "ECL-2.0",
     "cal-1.0": "CAL-1.0", "cal-1.0-combined-work-exception": "CAL-1.0",
     "mup": "MulanPSL-2.0", "mulanpsl-2.0": "MulanPSL-2.0",
+    # Non-SPDX but well-known licenses
+    "unsplash": "Unsplash", "unsplash-license": "Unsplash",
+    # Bare / versionless Creative Commons (scanners sometimes emit these)
+    "cc0": "CC0-1.0",
+    "cc-by-sa": "CC-BY-SA",  # kept versionless — flagged by review
+    "cc-by": "CC-BY",        # kept versionless — flagged by review
 }
 
 def to_dep5(raw):
@@ -640,6 +698,125 @@ def progress(current, total, label="Analyzing"):
         if current == total:
             sys.stderr.write("\n")
             sys.stderr.flush()
+
+# ══════════════════════════════════════════════════════════════════════
+# Desktop wallpaper metadata enrichment
+# ══════════════════════════════════════════════════════════════════════
+# KDE metadata.json and GNOME background-properties .xml files describe
+# wallpaper images but are NOT themselves subject to the image copyright.
+# Extract author/license info and apply it to the ACTUAL IMAGE FILES.
+
+# Build path → scan_result lookup for fast enrichment
+_path_to_result = {}
+for _r in scan_results:
+    _path_to_result[_r["path"].lstrip("./")] = _r
+
+_enriched_count = 0
+
+# ── KDE metadata.json enrichment ─────────────────────────────────────
+for _r in scan_results:
+    _fp = _r["path"].lstrip("./")
+    if os.path.basename(_fp) != "metadata.json":
+        continue
+    try:
+        with open(_fp, encoding="utf-8") as _mf:
+            _meta = json.load(_mf)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        continue
+    _kp = _meta.get("KPlugin", {})
+    if not _kp:
+        continue
+    # Extract author holder strings
+    _holders = []
+    for _auth in _kp.get("Authors", []):
+        _name = _auth.get("Name", "").strip()
+        _email = _auth.get("Email", "").strip()
+        if _name or _email:
+            parts = []
+            if _name:
+                parts.append(_name)
+            if _email:
+                parts.append(f"<{_email}>")
+            _holders.append(" ".join(parts))
+    # Extract license
+    _klic = _kp.get("License", "").strip()
+    _dep5_lic = to_dep5(_klic) if _klic else None
+
+    # Detect Unsplash-sourced images: if the metadata contains an
+    # unsplash.com URL (in Website, Id, or anywhere in the JSON),
+    # the actual license for the image is the Unsplash license,
+    # regardless of what KPlugin.License says (it is often wrong
+    # or generic for Unsplash-sourced wallpapers).
+    _meta_str = json.dumps(_meta).lower()
+    if "unsplash.com" in _meta_str:
+        _dep5_lic = "Unsplash"
+
+    if not _holders and not _dep5_lic:
+        continue
+    # Resolve symlinks in contents/images/ to find the actual image
+    _wdir = str(Path(_fp).parent)
+    _img_dir = os.path.join(_wdir, "contents", "images")
+    if not os.path.isdir(_img_dir):
+        continue
+    _target_paths = set()
+    for _link in os.listdir(_img_dir):
+        _link_path = os.path.join(_img_dir, _link)
+        if os.path.islink(_link_path):
+            _real = os.path.relpath(os.path.realpath(_link_path))
+            _target_paths.add(_real)
+    # Enrich the actual image file entries
+    for _img_path in _target_paths:
+        _img_r = _path_to_result.get(_img_path)
+        if not _img_r:
+            continue
+        for _h in _holders:
+            if _h not in _img_r["copyrights"]:
+                _img_r["copyrights"].append(_h)
+        if _dep5_lic and not _img_r["licenses"]:
+            _img_r["licenses"] = [_dep5_lic]
+        _enriched_count += 1
+
+# ── GNOME background-properties XML enrichment ───────────────────────
+for _xml_path in globmod.glob("usr/share/gnome-background-properties/*.xml"):
+    try:
+        _tree = ET.parse(_xml_path)
+    except (OSError, ET.ParseError):
+        continue
+    for _wp in _tree.findall(".//wallpaper"):
+        _name_el = _wp.find("name")
+        _fn_el = _wp.find("filename")
+        if _name_el is None or _fn_el is None:
+            continue
+        _name_text = (_name_el.text or "").strip()
+        _fn_text = (_fn_el.text or "").strip()
+        if not _name_text or not _fn_text:
+            continue
+        # Extract artist from "Title by Artist Name" format
+        _by_match = re.search(r'\s+by\s+(.+)$', _name_text, re.IGNORECASE)
+        if not _by_match:
+            continue
+        _artist = _by_match.group(1).strip()
+        if not _artist:
+            continue
+        # Map absolute filename to relative path
+        _img_rel = _fn_text.lstrip("/")
+        _img_r = _path_to_result.get(_img_rel)
+        if not _img_r:
+            continue
+        if _artist not in _img_r["copyrights"]:
+            _img_r["copyrights"].append(_artist)
+            _enriched_count += 1
+        # Detect Unsplash-sourced images: check for unsplash.com in any
+        # child element (e.g. <source>) or the wallpaper XML text content
+        if not _img_r["licenses"]:
+            _wp_text = ET.tostring(_wp, encoding="unicode", method="text")
+            _wp_xml = ET.tostring(_wp, encoding="unicode")
+            if "unsplash.com" in _wp_text or "unsplash.com" in _wp_xml:
+                _img_r["licenses"] = ["Unsplash"]
+
+if _enriched_count:
+    print(f"  {_enriched_count} image(s) enriched from wallpaper metadata.",
+          file=sys.stderr)
 
 # ══════════════════════════════════════════════════════════════════════
 # Directory license/copyright inheritance
@@ -1301,6 +1478,11 @@ def merge_copyrights(raw_list, prefer_unicode=None):
     author_years = {}    # norm_key → set of years
     author_best = {}     # norm_key → original author string (longest wins)
     email_to_key = {}    # email → first norm_key seen (for email-based dedup)
+
+    def _author_score(a):
+        has_nonascii = any(ord(c) > 127 for c in a)
+        return (has_nonascii, len(a))
+
     for raw in raw_list:
         if not raw or not raw.strip():
             continue
@@ -1322,11 +1504,57 @@ def merge_copyrights(raw_list, prefer_unicode=None):
         author_years[key].update(years)
         # Keep the best variant: prefer non-ASCII (proper unicode names)
         # over ASCII-only, then longest among same category.
-        def _author_score(a):
-            has_nonascii = any(ord(c) > 127 for c in a)
-            return (has_nonascii, len(a))
         if _author_score(author) > _author_score(author_best[key]):
             author_best[key] = author
+
+    # Secondary dedup: merge entries whose names match when whitespace
+    # and hyphens are stripped.  Catches CamelCase/concatenated usernames
+    # (e.g. "PushkarDeshpande") matching spaced names ("Pushkar Deshpande").
+    compressed_map = {}  # compressed_key → canonical_key
+    for key in sorted(author_years,
+                      key=lambda k: (-len(author_best.get(k, '')), k)):
+        ck = re.sub(r'[\s\-]+', '', key)
+        if ck in compressed_map:
+            canon = compressed_map[ck]
+            author_years[canon].update(author_years.pop(key))
+            if _author_score(author_best[key]) > _author_score(author_best[canon]):
+                author_best[canon] = author_best[key]
+            del author_best[key]
+        else:
+            compressed_map[ck] = key
+
+    # Tertiary dedup: fuzzy match by edit distance to catch typos
+    # like "Kontros" vs "Krontros" or "Adolfo" vs "Adolpho".
+    def _edit_dist(a, b):
+        if len(a) < len(b):
+            a, b = b, a
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a):
+            curr = [i + 1]
+            for j, cb in enumerate(b):
+                curr.append(min(prev[j + 1] + 1, curr[j] + 1,
+                                prev[j] + (ca != cb)))
+            prev = curr
+        return prev[-1]
+
+    remaining = list(author_years.keys())
+    merged = set()
+    for i, k1 in enumerate(remaining):
+        if k1 in merged:
+            continue
+        ck1 = re.sub(r'[\s\-]+', '', k1)
+        for k2 in remaining[i + 1:]:
+            if k2 in merged:
+                continue
+            ck2 = re.sub(r'[\s\-]+', '', k2)
+            if len(ck1) < 8 or len(ck2) < 8:
+                continue
+            if _edit_dist(ck1, ck2) <= 2:
+                author_years[k1].update(author_years.pop(k2))
+                if _author_score(author_best[k2]) > _author_score(author_best[k1]):
+                    author_best[k1] = author_best[k2]
+                del author_best[k2]
+                merged.add(k2)
 
     def _fmt_years(yrs):
         """Collapse a set of years into compact ranges: 2014-2016, 2020."""
@@ -1478,6 +1706,100 @@ def check_copyright_holders():
     return missing_holders, extra_holders, star_holder_files
 
 # ══════════════════════════════════════════════════════════════════════
+# Stanza consolidation detection
+# ══════════════════════════════════════════════════════════════════════
+
+def _parse_paragraph_stanzas(text):
+    """Parse copyright text into paragraph-level stanzas.
+
+    Returns list of dicts:
+    [{"files": [str], "cops": [str], "license": str, "para_text": str}]
+    Only includes paragraphs that have Files:, Copyright:, and License:.
+    """
+    result = []
+    for para in text.split("\n\n"):
+        files = []
+        cops = []
+        lic = None
+        current_field = None
+        for line in para.split("\n"):
+            if line.startswith("Files:"):
+                rest = line[6:].strip()
+                if rest:
+                    files.extend(rest.split())
+                current_field = "files"
+            elif line.startswith("Copyright:"):
+                cop_val = line[10:].strip()
+                if cop_val:
+                    cops.append(cop_val)
+                current_field = "copyright"
+            elif line.startswith("License:"):
+                lic = line[8:].strip().split()[0] if line[8:].strip() else None
+                current_field = "license"
+            elif current_field == "files" and line.startswith(" ") and not line.startswith(" ."):
+                files.extend(line.strip().split())
+            elif current_field == "copyright" and line.startswith(" ") and line.strip():
+                cops.append(line.strip())
+        if files and lic and cops:
+            result.append({
+                "files": files,
+                "cops": cops,
+                "license": lic,
+                "para_text": para,
+            })
+    return result
+
+def check_consolidation(text=None):
+    """Identify file stanzas that share the same license and author(s).
+
+    Stanzas with identical (license, normalized copyright holder set) can
+    be merged into a single stanza with all files listed and copyright
+    years collapsed into ranges.
+
+    Returns list of consolidation groups:
+    [{"license": str, "stanzas": [dict], "merged_files": [str],
+      "merged_cops": [str]}]
+    Each group contains 2+ stanzas that could be consolidated.
+    """
+    src = text if text is not None else copyright_text
+    para_stanzas = _parse_paragraph_stanzas(src)
+
+    # Group by (license, normalized holders set)
+    groups = defaultdict(list)
+    for ps in para_stanzas:
+        # Skip catch-all stanzas
+        if ps["files"] == ["*"]:
+            continue
+        holder_keys = []
+        for c in ps["cops"]:
+            n = norm_copyright(c)
+            if n:
+                holder_keys.append(n)
+        holder_key = frozenset(holder_keys)
+        groups[(ps["license"], holder_key)].append(ps)
+
+    # Return only groups with 2+ stanzas
+    consolidatable = []
+    for (lic, holder_key), stanza_list in sorted(groups.items()):
+        if len(stanza_list) >= 2:
+            # Merge files from all stanzas
+            merged_files = []
+            for ps in stanza_list:
+                merged_files.extend(ps["files"])
+            # Merge copyright lines (combine years per author)
+            all_cops = []
+            for ps in stanza_list:
+                all_cops.extend(ps["cops"])
+            merged_cops = merge_copyrights(all_cops)
+            consolidatable.append({
+                "license": lic,
+                "stanzas": stanza_list,
+                "merged_files": merged_files,
+                "merged_cops": merged_cops,
+            })
+    return consolidatable
+
+# ══════════════════════════════════════════════════════════════════════
 # False-positive heuristic
 # ══════════════════════════════════════════════════════════════════════
 def classify_fp(filepath, detected, declared):
@@ -1493,6 +1815,8 @@ def classify_fp(filepath, detected, declared):
         return "project-build-file"
     if fp.startswith("tools/"):
         return "tools-infrastructure"
+    if is_metadata_file(filepath):
+        return "metadata-infrastructure"
     return None
 
 def licenses_compatible(detected_raw, declared):
@@ -1616,14 +1940,17 @@ def is_nonfree(license_id):
 # MODE: generate — build a debian/copyright from scan results
 # ══════════════════════════════════════════════════════════════════════
 if mode == "generate":
-    # Collect per-file data: each entry has path, license key, copyrights.
+    # Collect per-file data, skipping metadata/infrastructure files
+    # (those are covered by the Files: * catch-all stanza).
     file_entries = []
     for idx, r in enumerate(scan_results, 1):
         progress(idx, total_files, "Grouping")
         if not r["licenses"]:
             continue
-        lic_key = tuple(sorted(set(to_dep5(l) for l in r["licenses"])))
         fp = r["path"].lstrip("./")
+        if is_metadata_file(fp):
+            continue  # covered by Files: * catch-all
+        lic_key = tuple(sorted(set(to_dep5(l) for l in r["licenses"])))
         file_entries.append({"path": fp, "lic": lic_key, "cops": list(r["copyrights"])})
 
     # Count files per license to pick the catch-all license
@@ -1632,57 +1959,71 @@ if mode == "generate":
         lic_counts[e["lic"]] += 1
     biggest_key = max(lic_counts, key=lambda k: lic_counts[k])
 
-    # Build compact directory-level globs for a set of paths.
-    # Always prefer dir/* when any files in that directory appear in the group.
-    def make_glob(paths):
-        """Produce the shortest set of globs covering all paths."""
+    def _copyright_holder_key(cop):
+        """Extract normalized author identity from a copyright string,
+        stripping year ranges, emails, and spaces so that the same person
+        with different formatting is recognized as one author."""
+        s = cop.strip()
+        s = re.sub(r'^(?:Copyright\s+)?(?:\(c\)\s+)?', '', s, flags=re.I)
+        s = re.sub(r'^[\d,\s-]+', '', s).strip()
+        s = re.sub(r'\s*<[^>]*>', '', s)   # strip email
+        s = re.sub(r'[\s\-]+', '', s)      # collapse spaces/hyphens
+        return s.lower()
+
+    def _filter_debian(paths):
+        if is_native:
+            return paths
+        return [p for p in paths if not p.startswith("debian/")]
+
+    # ── Build per-author stanza groups ───────────────────────────────
+    # Group files by (license, normalized-copyright-holder-set) so that
+    # files with the same author(s) and license share a stanza.  This
+    # produces per-author attribution rather than broad dir/* globs
+    # that lump unrelated copyright holders together.
+    root_catchall_cops = set()
+    stanza_groups = defaultdict(lambda: {"paths": [], "cops": []})
+    for e in file_entries:
+        d = str(Path(e["path"]).parent)
+        if e["lic"] == biggest_key and d == ".":
+            root_catchall_cops.update(e["cops"])
+            continue
+        # Group by (license, normalized author set)
+        author_key = frozenset(
+            _copyright_holder_key(c) for c in e["cops"] if c.strip())
+        sk = (e["lic"], author_key)
+        stanza_groups[sk]["paths"].append(e["path"])
+        stanza_groups[sk]["cops"].extend(e["cops"])
+
+    # Count scanned non-metadata files per directory (for dir/* decision)
+    dir_file_counts = defaultdict(int)
+    for e in file_entries:
+        d = str(Path(e["path"]).parent)
+        if d != ".":
+            dir_file_counts[d] += 1
+
+    def smart_glob(paths):
+        """Use dir/* only when every scanned non-metadata file in a
+        directory belongs to this group; otherwise list individual files."""
         dirs = defaultdict(list)
         for p in paths:
             d = str(Path(p).parent)
             dirs[d].append(p)
-        globs = []
+        result = []
         for d, files in sorted(dirs.items()):
             if d == ".":
-                globs.extend(sorted(files))
+                result.extend(sorted(files))
+            elif len(files) == dir_file_counts.get(d, 0) and len(files) > 1:
+                result.append(d + "/*")
             else:
-                globs.append(d + "/*")
-        # Deduplicate: if parent/* already covers child/*, drop child
+                result.extend(sorted(files))
+        # Deduplicate: if parent/* covers child/*, drop child
         deduped = []
-        for g in sorted(globs):
+        for g in sorted(result):
             if any(g != prev and fnmatch.fnmatch(g, prev)
                    for prev in deduped):
                 continue
             deduped.append(g)
         return deduped
-
-    # ── Build per-directory stanza groups ────────────────────────────
-    # Root-level files with the catch-all license go into Files: *.
-    # Within each directory, the majority license gets a dir/* glob;
-    # files with minority licenses are listed individually so that
-    # DEP-5 last-match-wins correctly overrides the directory glob.
-    dir_lic_files = defaultdict(lambda: defaultdict(list))
-    root_catchall_cops = set()
-    for e in file_entries:
-        d = str(Path(e["path"]).parent)
-        if e["lic"] == biggest_key and d == ".":
-            root_catchall_cops.update(e["cops"])
-        else:
-            dir_lic_files[d][e["lic"]].append(e)
-
-    glob_groups = defaultdict(lambda: {"paths": [], "cops": set()})
-    file_groups = defaultdict(lambda: {"paths": [], "cops": set()})
-    for d, lic_entries in dir_lic_files.items():
-        majority_lic = max(lic_entries, key=lambda k: len(lic_entries[k]))
-        for lic_key, entries in lic_entries.items():
-            for e in entries:
-                if lic_key == majority_lic:
-                    key = (lic_key, d)
-                    glob_groups[key]["paths"].append(e["path"])
-                    glob_groups[key]["cops"].update(e["cops"])
-                else:
-                    key = (lic_key, d)
-                    file_groups[key]["paths"].append(e["path"])
-                    file_groups[key]["cops"].update(e["cops"])
 
     out = []
     out.append("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/")
@@ -1711,52 +2052,20 @@ if mode == "generate":
     out.append("License: " + " AND ".join(biggest_key))
     out.append("")
 
-    # ── Merge glob_groups that share the same license + copyrights ───
-    # Consolidate directories with identical (license, copyright set) into
-    # a single stanza with multiple dir/* globs.
-    def _filter_debian(paths):
-        if is_native:
-            return paths
-        return [p for p in paths if not p.startswith("debian/")]
-
-    stanza_map = defaultdict(list)  # (lic_key, frozenset(cops)) → [paths]
-    for (lic_key, d), grp in glob_groups.items():
-        paths = _filter_debian(grp["paths"])
+    # Emit per-author stanzas — each group shares the same license and
+    # the same set of copyright holders (regardless of year differences).
+    for sk in sorted(stanza_groups,
+                     key=lambda k: (k[0], sorted(stanza_groups[k]["paths"])[0])):
+        lic_key, _author_fs = sk
+        grp = stanza_groups[sk]
+        paths = sorted(_filter_debian(grp["paths"]))
         if not paths:
             continue
-        sk = (lic_key, frozenset(grp["cops"]))
-        stanza_map[sk].extend(paths)
-
-    # Directory-level stanzas (majority license per directory)
-    for sk in sorted(stanza_map, key=lambda k: (k[0], sorted(stanza_map[k])[0])):
-        lic_key, cops_frozen = sk
-        paths = sorted(stanza_map[sk])
-        cops_raw = sorted(cops_frozen)
+        cops_raw = sorted(set(grp["cops"]))
         merged_cops = merge_copyrights(cops_raw)
-        globs = make_glob(paths)
+        globs = smart_glob(paths)
 
         out.append(format_files_field(globs))
-        out.append("Copyright: " + format_copyright_field(merged_cops))
-        out.append("License: " + " AND ".join(lic_key))
-        out.append("")
-
-    # File-specific stanzas for minority licenses (listed after directory
-    # globs so DEP-5 last-match-wins applies the correct license).
-    file_stanza_map = defaultdict(list)
-    for (lic_key, d), grp in file_groups.items():
-        paths = _filter_debian(grp["paths"])
-        if not paths:
-            continue
-        sk = (lic_key, frozenset(grp["cops"]))
-        file_stanza_map[sk].extend(paths)
-
-    for sk in sorted(file_stanza_map, key=lambda k: (k[0], sorted(file_stanza_map[k])[0])):
-        lic_key, cops_frozen = sk
-        paths = sorted(file_stanza_map[sk])
-        cops_raw = sorted(cops_frozen)
-        merged_cops = merge_copyrights(cops_raw)
-
-        out.append(format_files_field(paths))  # explicit paths, no globbing
         out.append("Copyright: " + format_copyright_field(merged_cops))
         out.append("License: " + " AND ".join(lic_key))
         out.append("")
@@ -1840,9 +2149,7 @@ if mode == "generate":
     # License text stubs
     all_lics = set()
     all_lics.update(biggest_key)
-    for (lic_key, _cops_fs) in stanza_map:
-        all_lics.update(lic_key)
-    for (lic_key, _cops_fs) in file_stanza_map:
+    for (lic_key, _author_fs) in stanza_groups:
         all_lics.update(lic_key)
     if deb_lic_added:
         all_lics.add(deb_lic_added)
@@ -1920,9 +2227,9 @@ if mode == "generate":
 
     # Summary to stderr
     print(f"\n  Files scanned:  {len(scan_results)}", file=sys.stderr)
-    print(f"  License groups: {len(set(k[0] for k in stanza_map)) + 1}", file=sys.stderr)
+    print(f"  License groups: {len(set(k[0] for k in stanza_groups)) + 1}", file=sys.stderr)
     print(f"  Unique licenses: {len(all_lics)}", file=sys.stderr)
-    print(f"  Stanzas (excl. catch-all): {len(stanza_map)}", file=sys.stderr)
+    print(f"  Stanzas (excl. catch-all): {len(stanza_groups)}", file=sys.stderr)
     if fetched_count:
         print(f"  License texts fetched: {fetched_count}", file=sys.stderr)
     unfetched = len(all_lics) - fetched_count - len(all_lics & COMMON_LICENSES)
@@ -2142,9 +2449,116 @@ if mode == "review":
         if len(low_confidence) > 5:
             print(f"        ... and {len(low_confidence) - 5} more")
 
+    # Test 14: Stanza consolidation opportunities
+    consol_groups = check_consolidation()
+    if consol_groups:
+        total_saving = sum(len(g["stanzas"]) - 1 for g in consol_groups)
+        print(f"[INFO] Stanza consolidation: {len(consol_groups)} group(s), "
+              f"{total_saving} stanza(s) can be merged")
+        for grp in consol_groups[:5]:
+            n = len(grp["stanzas"])
+            f_count = len(grp["merged_files"])
+            print(f"        {grp['license']}: {n} stanzas → 1 "
+                  f"({f_count} files, {', '.join(grp['merged_cops'][:2])})")
+        if len(consol_groups) > 5:
+            print(f"        ... and {len(consol_groups) - 5} more")
+    else:
+        print("[PASS] No stanza consolidation opportunities")
+
+    # Test 15: FIXME entries in copyright file
+    fixme_stanzas = []
+    for para in copyright_text.split("\n\n"):
+        if "FIXME" in para and para.strip().startswith("Files:"):
+            # Extract first Files: line for identification
+            first_file = ""
+            for line in para.split("\n"):
+                if line.startswith("Files:"):
+                    first_file = line[6:].strip().split()[0] if line[6:].strip() else "?"
+                    break
+            fixme_stanzas.append(first_file)
+    if fixme_stanzas:
+        print(f"[WARN] FIXME entries needing attention: {len(fixme_stanzas)}")
+        for fs in fixme_stanzas[:5]:
+            print(f"        Files: {fs} ...")
+        if len(fixme_stanzas) > 5:
+            print(f"        ... and {len(fixme_stanzas) - 5} more")
+    else:
+        print("[PASS] No FIXME entries in copyright file")
+
+    # Test 16: Versionless or invalid license identifiers
+    versionless = []
+    for _, lic in stanzas:
+        if lic and re.match(r'^CC-BY(?:-SA|-NC|-ND)*$', lic):
+            versionless.append(lic)
+        elif lic and lic.lower() in ("cc0", "unknown"):
+            versionless.append(lic)
+    versionless = sorted(set(versionless))
+    if versionless:
+        print(f"[FAIL] Versionless or invalid license identifiers: "
+              f"{len(versionless)}")
+        for vl in versionless:
+            print(f"        {vl}")
+    else:
+        print("[PASS] All license identifiers have proper versions")
+
+    # Test 17: Broad glob stanzas that may override specific stanzas
+    # In DEP-5, last-match-wins — a broad glob appearing AFTER specific
+    # per-file stanzas will override them with potentially wrong info.
+    override_issues = []
+    seen_specifics = set()  # track files covered by specific stanzas
+    for glob_pat, lic in stanzas:
+        if glob_pat == "*":
+            continue
+        if "*" in glob_pat:
+            # This is a glob — check if specific stanzas above it
+            # already covered files that this glob would match
+            overridden = []
+            for sp in seen_specifics:
+                if fnmatch.fnmatch(sp, glob_pat):
+                    overridden.append(sp)
+            if overridden:
+                override_issues.append((glob_pat, lic, len(overridden)))
+        else:
+            seen_specifics.add(glob_pat)
+    if override_issues:
+        print(f"[WARN] Broad globs overriding specific stanzas: "
+              f"{len(override_issues)}")
+        for glob_pat, lic, n in override_issues[:5]:
+            print(f"        {glob_pat} ({lic}) overrides {n} specific stanza(s)")
+        if len(override_issues) > 5:
+            print(f"        ... and {len(override_issues) - 5} more")
+    else:
+        print("[PASS] No broad-glob override conflicts")
+
+    # Test 18: Duplicate file declarations across stanzas
+    # If the same file path appears in multiple stanzas, the last one wins
+    # (DEP-5 last-match-wins).  This is almost always an error — a later
+    # stanza with weaker info overriding a correct earlier one.
+    file_occurrences = defaultdict(list)  # path → [(index, lic)]
+    for i, (glob_pat, lic) in enumerate(stanzas):
+        if "*" not in glob_pat:
+            file_occurrences[glob_pat].append((i, lic))
+    dup_files = {fp: occs for fp, occs in file_occurrences.items()
+                 if len(occs) > 1}
+    if dup_files:
+        print(f"[WARN] Files declared in multiple stanzas: {len(dup_files)}")
+        for fp in sorted(dup_files)[:5]:
+            lics = [lic for _, lic in dup_files[fp]]
+            print(f"        {fp}  ({' → '.join(lics)})")
+        if len(dup_files) > 5:
+            print(f"        ... and {len(dup_files) - 5} more")
+    else:
+        print("[PASS] No duplicate file declarations")
+
+    fixme_ok = not fixme_stanzas
+    versionless_ok = not versionless
+    override_ok = not override_issues
+    dup_ok = not dup_files
+
     if (real_count == 0 and not missing_in_copyright and not nonfree_found
             and lic_ok and cov_ok and not stale and dep5_ok
-            and not missing_holders):
+            and not missing_holders and fixme_ok and versionless_ok
+            and override_ok and dup_ok):
         print("VERDICT: debian/copyright appears complete and accurate.")
     elif real_count < 10 and not nonfree_found and dep5_ok:
         print("VERDICT: Minor issues — mostly acceptable, review flagged items.")
@@ -2220,6 +2634,8 @@ else:
             "Project build files (CMakeLists.txt / .pro) carrying main license",
         "tools-infrastructure":
             "Build infrastructure / tooling files in tools/",
+        "metadata-infrastructure":
+            "Metadata / infrastructure files (covered by Files: * catch-all)",
     }
 
     print("=" * W)
@@ -2418,10 +2834,34 @@ else:
         print("\nDeclared copyright holders match detected holders.")
     print()
 
+    # Stanza consolidation opportunities
+    consol_groups = check_consolidation()
+    print("=" * W)
+    print("SECTION 9: STANZA CONSOLIDATION")
+    print("=" * W)
+
+    if consol_groups:
+        total_saving = sum(len(g["stanzas"]) - 1 for g in consol_groups)
+        print(f"\n{len(consol_groups)} group(s) of stanzas can be consolidated "
+              f"({total_saving} stanza(s) can be eliminated):\n")
+        for grp in consol_groups:
+            n = len(grp["stanzas"])
+            f_count = len(grp["merged_files"])
+            print(f"  {grp['license']} — {n} stanzas → 1 ({f_count} files)")
+            print(f"    Copyright: {', '.join(grp['merged_cops'])}")
+            for ps in grp["stanzas"]:
+                print(f"      • {' '.join(ps['files'][:3])}"
+                      + (f" ... (+{len(ps['files'])-3} more)" if len(ps['files']) > 3 else ""))
+        print()
+        print("  Tip: Use --fix to interactively merge these stanzas.")
+    else:
+        print("\nNo consolidation opportunities found.")
+    print()
+
     # Decopy findings (if decopy was run)
     if decopy_issues:
         print("=" * W)
-        print("SECTION 9: DECOPY FINDINGS")
+        print("SECTION 10: DECOPY FINDINGS")
         print("=" * W)
         print(f"\n{len(decopy_issues)} issue(s) reported by decopy:\n")
         for line in decopy_issues[:20]:
@@ -2433,7 +2873,7 @@ else:
     # Low-confidence detections (scancode only)
     if low_confidence:
         print("=" * W)
-        print("SECTION 10: LOW-CONFIDENCE DETECTIONS (skipped)")
+        print("SECTION 11: LOW-CONFIDENCE DETECTIONS (skipped)")
         print("=" * W)
         print(f"\n{len(low_confidence)} detection(s) below confidence threshold "
               f"({MIN_CONFIDENCE}%):\n")
@@ -2460,6 +2900,9 @@ else:
     print(f"  Stale stanza globs:                    {len(stale)}")
     print(f"  DEP-5 format errors:                   {len(dep5_errors)}")
     print(f"  DEP-5 format warnings:                 {len(dep5_warnings)}")
+    consol_saving = sum(len(g['stanzas']) - 1 for g in consol_groups) if consol_groups else 0
+    if consol_groups:
+        print(f"  Stanzas consolidatable:                {consol_saving} (in {len(consol_groups)} group(s))")
 
     total_issues = real_count + len(src_uncovered) + len(stale) + len(dep5_errors)
     if total_issues == 0:
@@ -2470,7 +2913,8 @@ else:
 
     # Offer to enter fix mode if issues were found and --fix wasn't given
     fixable_dep5_count = sum(1 for i in dep5_issues if i[3] is not None)
-    if not fix_mode and (total_issues > 0 or fixable_dep5_count > 0) and copyright_file:
+    has_fixable = total_issues > 0 or fixable_dep5_count > 0 or consol_saving > 0
+    if not fix_mode and has_fixable and copyright_file:
         if yes_mode:
             fix_mode = True
         elif sys.stderr.isatty():
@@ -2488,7 +2932,7 @@ else:
     # ══════════════════════════════════════════════════════════════════
     # Interactive fix mode
     # ══════════════════════════════════════════════════════════════════
-    if fix_mode and (total_issues > 0 or fixable_dep5_count > 0) and copyright_file:
+    if fix_mode and has_fixable and copyright_file:
         print("=" * W)
         print("INTERACTIVE FIX MODE")
         print("=" * W)
@@ -2596,58 +3040,59 @@ else:
 
         # ── Fix 1: Add stanzas for mismatched files ──────────────────
         if real_mismatches:
-            # Group mismatched files by detected license
+            # Group mismatched files by detected license, skipping
+            # debian/*, symlinks, and metadata/infrastructure files
+            # (the latter are covered by the Files: * catch-all).
             by_license = defaultdict(list)
             for (det, decl), files in real_mismatches.items():
-                # Skip debian/copyright itself (it embeds many license texts)
                 filtered = [f for f in files
-                            if f.lstrip("./") != "debian/copyright"]
+                            if not f.lstrip("./").startswith("debian/")
+                            and not os.path.islink(f.lstrip("./"))
+                            and not is_metadata_file(f)]
                 if filtered:
                     by_license[det].extend(filtered)
 
-            # ── Deduplicate overlapping directory globs ───────────────
-            # When files from the same directory have different detected
-            # licenses, make_fix_globs would produce the same dir/* glob
-            # in multiple stanzas.  Assign each directory to the license
-            # with the most files in that directory, keeping only truly
-            # individual outliers in other stanzas.
-            dir_lic_files = defaultdict(lambda: defaultdict(list))
+            # ── Group by (license, per-file copyright holders) ────────
+            # Instead of broad dir/* globs that lump unrelated holders,
+            # produce per-author stanzas.  Files with the same author(s)
+            # and license share a single stanza.
+
+            def _holder_key(cop):
+                """Normalize a copyright string to an author identity key."""
+                s = cop.strip()
+                s = re.sub(r'^(?:Copyright\s+)?(?:\(c\)\s+)?', '', s, flags=re.I)
+                s = re.sub(r'^[\d,\s-]+', '', s).strip()
+                s = re.sub(r'\s*<[^>]*>', '', s)   # strip email
+                s = re.sub(r'[\s\-]+', '', s)      # collapse spaces/hyphens
+                return s.lower()
+
+            author_groups = defaultdict(lambda: {"files": [], "cops": []})
             for det_lic, files in by_license.items():
                 for f in files:
-                    d = str(Path(f.lstrip("./")).parent)
-                    dir_lic_files[d][det_lic].append(f)
+                    fps = {f, f.lstrip("./")}
+                    file_cops = []
+                    for r in scan_results:
+                        if r["path"] in fps or r["path"].lstrip("./") in fps:
+                            file_cops = [c for c in r.get("copyrights", []) if c]
+                            break
+                    ak = frozenset(_holder_key(c) for c in file_cops)
+                    key = (det_lic, ak)
+                    author_groups[key]["files"].append(f)
+                    author_groups[key]["cops"].extend(file_cops)
 
-            deduped_by_license = defaultdict(list)
-            split_dirs = {}  # dir -> dominant license
-            for d, lic_map in dir_lic_files.items():
-                if len(lic_map) == 1:
-                    # Only one license in this directory — keep as-is
-                    for det_lic, files in lic_map.items():
-                        deduped_by_license[det_lic].extend(files)
-                else:
-                    # Multiple licenses — assign dir/* to the dominant one
-                    dominant = max(lic_map, key=lambda l: len(lic_map[l]))
-                    split_dirs[d] = dominant
-                    deduped_by_license[dominant].extend(lic_map[dominant])
-                    for det_lic, files in lic_map.items():
-                        if det_lic != dominant:
-                            # Keep individual file paths (not dir glob)
-                            deduped_by_license[det_lic].extend(files)
-
-            by_license = {k: v for k, v in deduped_by_license.items() if v}
-
-            if by_license:
+            if author_groups:
                 print("The following new Files: stanzas are proposed for")
                 print("files whose detected license differs from what's declared:\n")
 
-            for det_lic, files in sorted(by_license.items()):
-                # Don't glob directories where this license is the minority
-                no_glob = {d for d, dom in split_dirs.items()
-                           if dom != det_lic}
-                globs = make_fix_globs(files, no_glob_dirs=no_glob)
-                cops = get_copyrights_for_files(files)
-                merged_cops = merge_copyrights(cops)
+            for (det_lic, _ak), grp in sorted(
+                    author_groups.items(),
+                    key=lambda kv: (kv[0][0], sorted(f.lstrip("./") for f in kv[1]["files"])[0])):
+                files = grp["files"]
+                cops_raw = sorted(set(grp["cops"]))
+                merged_cops = merge_copyrights(cops_raw)
                 cop_field = format_copyright_field(merged_cops)
+                # List individual files (no dir/* globs)
+                globs = sorted(f.lstrip("./") for f in files)
 
                 print(f"  Proposed stanza ({len(files)} file(s)):")
                 print(f"  ┌──────────────────────────────────────")
@@ -2897,6 +3342,14 @@ else:
                     star_files = set()
                     for h in holders:
                         star_files.update(star_file_map.get(h, set()))
+
+                    # Exclude debian/* files (handled by Fix 5) and
+                    # symlinks (not subject to separate copyright).
+                    star_files = {
+                        f for f in star_files
+                        if not f.lstrip("./").startswith("debian/")
+                        and not os.path.islink(f.lstrip("./"))
+                    }
                     if not star_files:
                         continue
 
@@ -3160,6 +3613,89 @@ else:
                             break
                     if not found:
                         print(f"  ✗ Could not locate stanza (edit manually).\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+
+        # ── Fix 6: Consolidate stanzas ───────────────────────────────
+        # Re-check for consolidation opportunities against working_text
+        # (reflects any stanzas added/modified by earlier fixes).
+        consol_groups_fix = check_consolidation(working_text)
+        if consol_groups_fix:
+            total_saving = sum(len(g["stanzas"]) - 1
+                               for g in consol_groups_fix)
+            print(f"{len(consol_groups_fix)} group(s) of stanzas can be "
+                  f"consolidated ({total_saving} stanza(s) merged):\n")
+
+            for grp in consol_groups_fix:
+                lic = grp["license"]
+                n = len(grp["stanzas"])
+                merged_files = grp["merged_files"]
+                merged_cops = grp["merged_cops"]
+
+                print(f"  {lic} — {n} stanzas → 1 "
+                      f"({len(merged_files)} files)")
+                print(f"  Proposed merged stanza:")
+                print(f"  ┌──────────────────────────────────────")
+                # Show files
+                if len(merged_files) <= 5:
+                    print(f"  │ Files: {merged_files[0]}")
+                    for mf in merged_files[1:]:
+                        print(f"  │        {mf}")
+                else:
+                    print(f"  │ Files: {merged_files[0]}")
+                    print(f"  │        {merged_files[1]}")
+                    print(f"  │        ... ({len(merged_files)} files total)")
+                # Show merged copyright
+                for i, cl in enumerate(merged_cops or ["FIXME"]):
+                    tag = "Copyright" if i == 0 else "          "
+                    print(f"  │ {tag}: {cl}")
+                print(f"  │ License: {lic}")
+                print(f"  └──────────────────────────────────────")
+
+                # Show what will be replaced
+                print(f"\n  Replacing {n} existing stanzas:")
+                for ps in grp["stanzas"]:
+                    files_preview = " ".join(ps["files"][:2])
+                    if len(ps["files"]) > 2:
+                        files_preview += f" ... (+{len(ps['files'])-2})"
+                    print(f"    • Files: {files_preview}")
+
+                answer = ask("\n  Consolidate these stanzas? [y/N] "
+                             ).strip().lower()
+                if answer in ("y", "yes"):
+                    # Build the merged stanza text
+                    files_str = format_files_field(merged_files)
+                    cop_field = format_copyright_field(merged_cops)
+                    merged_stanza = (f"{files_str}\n"
+                                     f"Copyright: {cop_field}\n"
+                                     f"License: {lic}")
+
+                    # Remove old stanzas from working_text and insert
+                    # the merged one at the position of the first.
+                    first_pos = None
+                    for ps in grp["stanzas"]:
+                        pt = ps["para_text"]
+                        pos = working_text.find(pt)
+                        if pos == -1:
+                            continue
+                        if first_pos is None:
+                            first_pos = pos
+                            # Replace first occurrence with merged stanza
+                            working_text = (working_text[:pos]
+                                            + merged_stanza
+                                            + working_text[pos + len(pt):])
+                        else:
+                            # Remove subsequent occurrences
+                            # Also remove surrounding blank line
+                            before = working_text[:pos]
+                            after = working_text[pos + len(pt):]
+                            # Strip one leading newline if present
+                            if before.endswith("\n\n"):
+                                before = before[:-1]
+                            working_text = before + after
+
+                    changes_made += 1
+                    print(f"  ✓ Consolidated.\n")
                 else:
                     print(f"  ✗ Skipped.\n")
 
