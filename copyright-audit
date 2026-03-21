@@ -243,7 +243,7 @@ export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FIL
 export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR HAS_SANITY_CHECK
 
 python3 - "$SCAN_FILE" << 'PYEOF'
-import json, os, re, sys, fnmatch, textwrap, unicodedata, glob as globmod
+import datetime, json, os, re, subprocess, sys, fnmatch, textwrap, unicodedata, glob as globmod
 import xml.etree.ElementTree as ET
 from collections import defaultdict, OrderedDict
 from pathlib import Path
@@ -413,6 +413,7 @@ def is_excluded(filepath):
 # the Files: * catch-all rather than receiving their own stanzas.
 _METADATA_GLOBS = (
     "*/metadata.json",
+    "*/metadata.desktop",
     "*/contents/screenshot.png",
     "usr/share/gnome-background-properties/*",
     "usr/share/plymouth/themes/*/*.plymouth",
@@ -1484,7 +1485,62 @@ def _parse_copyright(s):
     author = re.sub(r'\s+', ' ', author).strip()
     return years, author
 
-def merge_copyrights(raw_list, prefer_unicode=None):
+def _split_multi_authors(author_str):
+    """Split a string containing multiple comma/and-separated authors.
+
+    Handles patterns like:
+      "Huw Wilkins, Cory Kontros,and Andrew Wedderburn"
+      "John Smith and Jane Doe"
+      "Alice, Bob & Charlie"
+    Returns a list of individual author strings.
+    """
+    if not author_str:
+        return [author_str]
+    # Split on comma+and, comma+ampersand, standalone and/ampersand,
+    # or plain comma+space.  Order matters: longer patterns first.
+    parts = re.split(
+        r',\s*and\s+|,\s*&\s+|\s+and\s+|\s+&\s+|,\s+',
+        author_str, flags=re.IGNORECASE)
+    result = [p.strip() for p in parts if p and len(p.strip()) > 1]
+    return result if result else [author_str]
+
+def _infer_years_from_paths(paths):
+    """Infer copyright years from file modification times.
+
+    Tries git log for earliest commit year first, falls back to mtime.
+    Returns a set of ints.
+    """
+    years = set()
+    # Try git to get first-commit year per file (fast batch call)
+    git_ok = os.path.isdir(".git")
+    if git_ok and paths:
+        try:
+            clean = [p.lstrip("./") for p in paths if p]
+            result = subprocess.run(
+                ["git", "log", "--follow", "--diff-filter=A",
+                 "--format=%ai", "--"] + clean,
+                capture_output=True, text=True, timeout=10)
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line and len(line) >= 4:
+                    try:
+                        years.add(int(line[:4]))
+                    except ValueError:
+                        pass
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    # Fall back to mtime for files we couldn't get git info for
+    if not years:
+        for p in paths:
+            clean_p = p.lstrip("./")
+            try:
+                mtime = os.path.getmtime(clean_p)
+                years.add(datetime.datetime.fromtimestamp(mtime).year)
+            except (OSError, ValueError):
+                pass
+    return years
+
+def merge_copyrights(raw_list, prefer_unicode=None, file_paths=None):
     """Merge a list of raw copyright strings, combining years per author.
 
     Returns a list of formatted copyright lines, one per unique author,
@@ -1504,29 +1560,41 @@ def merge_copyrights(raw_list, prefer_unicode=None):
         has_nonascii = any(ord(c) > 127 for c in a)
         return (has_nonascii, len(a))
 
+    # Placeholder values that scanners emit for unrecognized holders
+    _PLACEHOLDER_HOLDERS = frozenset({
+        "unknown", "fixme", "todo", "none", "n/a", "no copyright",
+    })
+
     for raw in raw_list:
         if not raw or not raw.strip():
             continue
         years, author = _parse_copyright(raw)
         if not author:
             continue
-        # Primary key: name without email, unicode-normalized, lowered
-        name_only = _strip_email(author)
-        key = _normalize_unicode(name_only).lower()
-        # Email-based dedup: if two entries share the same email, merge them
-        email = _extract_email(author)
-        if email and email in email_to_key:
-            key = email_to_key[email]
-        elif email:
-            email_to_key[email] = key
-        if key not in author_years:
-            author_years[key] = set()
-            author_best[key] = author
-        author_years[key].update(years)
-        # Keep the best variant: prefer non-ASCII (proper unicode names)
-        # over ASCII-only, then longest among same category.
-        if _author_score(author) > _author_score(author_best[key]):
-            author_best[key] = author
+        if author.lower().strip() in _PLACEHOLDER_HOLDERS:
+            continue
+        # Split multi-author strings ("A, B and C" → ["A", "B", "C"])
+        individual_authors = _split_multi_authors(author)
+        for indiv in individual_authors:
+            if not indiv or indiv.lower().strip() in _PLACEHOLDER_HOLDERS:
+                continue
+            # Primary key: name without email, unicode-normalized, lowered
+            name_only = _strip_email(indiv)
+            key = _normalize_unicode(name_only).lower()
+            # Email-based dedup: if two entries share the same email, merge them
+            email = _extract_email(indiv)
+            if email and email in email_to_key:
+                key = email_to_key[email]
+            elif email:
+                email_to_key[email] = key
+            if key not in author_years:
+                author_years[key] = set()
+                author_best[key] = indiv
+            author_years[key].update(years)
+            # Keep the best variant: prefer non-ASCII (proper unicode names)
+            # over ASCII-only, then longest among same category.
+            if _author_score(indiv) > _author_score(author_best[key]):
+                author_best[key] = indiv
 
     # Secondary dedup: merge entries whose names match when whitespace
     # and hyphens are stripped.  Catches CamelCase/concatenated usernames
@@ -1602,6 +1670,27 @@ def merge_copyrights(raw_list, prefer_unicode=None):
                 if any(ord(c) > 127 for c in pref) and not any(ord(c) > 127 for c in cur):
                     author_best[key] = pref
 
+    # Infer fallback years for authors with no detected years
+    has_yearless = any(not author_years[k] for k in author_years)
+    if has_yearless:
+        # First try: use years from peer authors in the same merge.
+        # All raw copyrights cover the same files, so peer years are
+        # the best available signal.
+        peer_yrs = set()
+        for k in author_years:
+            peer_yrs.update(author_years[k])
+        if peer_yrs:
+            for key in author_years:
+                if not author_years[key]:
+                    author_years[key] = set(peer_yrs)
+        # Second try: infer from file modification / git history.
+        elif file_paths:
+            fallback_yrs = _infer_years_from_paths(file_paths)
+            if fallback_yrs:
+                for key in author_years:
+                    if not author_years[key]:
+                        author_years[key] = set(fallback_yrs)
+
     lines = []
     for key in sorted(author_years, key=lambda k: (
             min(author_years[k]) if author_years[k] else 9999, k)):
@@ -1670,11 +1759,13 @@ def format_copyright_field(merged_lines, max_col=80):
 
 def check_copyright_holders():
     """Compare detected copyright holders against declared ones per stanza.
-    Returns: (missing, extra, star_file_map)
+    Returns: (missing, extra, star_file_map, holder_file_map)
       missing: [(glob, detected_holder)] — detected but not declared
       extra: [(glob, declared_holder)] — declared but not found in any scanned file
       star_file_map: {holder_string: set_of_file_paths} — for the * glob only,
         maps each missing holder to the files where it was detected
+      holder_file_map: {(glob, holder_string): set_of_file_paths} — for ALL globs,
+        maps each (glob, holder) to the specific files where it was detected
     """
     # In DEP-5, when multiple stanzas match a file, the last one wins.
     # Map each file's copyrights only to its governing stanza.
@@ -1682,6 +1773,8 @@ def check_copyright_holders():
     declared_per_glob = {}
     # For the * glob, also track which files contribute each holder
     star_holder_files = defaultdict(set)  # holder_string → set of filepaths
+    # Track per-file attribution for ALL globs
+    holder_file_map = defaultdict(set)  # (glob, holder) → set of filepaths
 
     for glob_pat, lic in stanzas:
         declared_per_glob[glob_pat] = set(stanza_copyrights.get(glob_pat, []))
@@ -1697,18 +1790,26 @@ def check_copyright_holders():
             for c in r.get("copyrights", []):
                 if c:
                     detected_per_glob[governing_glob].add(c)
+                    holder_file_map[(governing_glob, c)].add(fp)
                     if governing_glob == "*":
                         star_holder_files[c].add(fp)
 
     missing_holders = []  # (glob, detected_holder_not_declared)
     extra_holders = []    # (glob, declared_holder_not_detected)
 
+    # Placeholder values that scanners emit for unrecognized holders
+    _placeholder_holders = frozenset({
+        "unknown", "fixme", "todo", "none", "n/a", "no copyright",
+    })
+
     for glob_pat in declared_per_glob:
         declared_set = declared_per_glob[glob_pat]
         detected_set = detected_per_glob.get(glob_pat, set())
 
         declared_norms = {norm_copyright(d): d for d in declared_set}
-        detected_norms = {norm_copyright(d): d for d in detected_set}
+        detected_norms = {norm_copyright(d): d for d in detected_set
+                          if _parse_copyright(d)[1].lower().strip()
+                          not in _placeholder_holders}
 
         # Detected but not declared (new authors)
         for dn, original in detected_norms.items():
@@ -1724,7 +1825,7 @@ def check_copyright_holders():
             if not any(dk in dn or dn in dk for dn in detected_norms):
                 extra_holders.append((glob_pat, original))
 
-    return missing_holders, extra_holders, star_holder_files
+    return missing_holders, extra_holders, star_holder_files, holder_file_map
 
 # ══════════════════════════════════════════════════════════════════════
 # Stanza consolidation detection
@@ -1811,7 +1912,7 @@ def check_consolidation(text=None):
             all_cops = []
             for ps in stanza_list:
                 all_cops.extend(ps["cops"])
-            merged_cops = merge_copyrights(all_cops)
+            merged_cops = merge_copyrights(all_cops, file_paths=merged_files)
             consolidatable.append({
                 "license": lic,
                 "stanzas": stanza_list,
@@ -2083,7 +2184,7 @@ if mode == "generate":
         if not paths:
             continue
         cops_raw = sorted(set(grp["cops"]))
-        merged_cops = merge_copyrights(cops_raw)
+        merged_cops = merge_copyrights(cops_raw, file_paths=paths)
         globs = smart_glob(paths)
 
         out.append(format_files_field(globs))
@@ -2520,7 +2621,7 @@ if mode == "review":
     dep5_ok = not dep5_errors
 
     # Test 11: Copyright holder accuracy
-    missing_holders, extra_holders, _ = check_copyright_holders()
+    missing_holders, extra_holders, _, _ = check_copyright_holders()
     cop_total = len(missing_holders) + len(extra_holders)
     if cop_total == 0:
         print("[PASS] Copyright holders match detected holders")
@@ -2923,7 +3024,7 @@ else:
     print()
 
     # Copyright holder audit
-    missing_holders, extra_holders, _ = check_copyright_holders()
+    missing_holders, extra_holders, _, _ = check_copyright_holders()
     print("=" * W)
     print("SECTION 8: COPYRIGHT HOLDER ACCURACY")
     print("=" * W)
@@ -3243,7 +3344,7 @@ else:
                     key=lambda kv: (kv[0][0], sorted(f.lstrip("./") for f in kv[1]["files"])[0])):
                 files = grp["files"]
                 cops_raw = sorted(set(grp["cops"]))
-                merged_cops = merge_copyrights(cops_raw)
+                merged_cops = merge_copyrights(cops_raw, file_paths=files)
                 cop_field = format_copyright_field(merged_cops)
                 # List individual files (no dir/* globs)
                 globs = sorted(f.lstrip("./") for f in files)
@@ -3447,7 +3548,7 @@ else:
         stanza_copyrights.clear()
         stanza_copyrights.update(stanza_copyrights_now)
 
-        missing_holders, extra_holders, star_file_map = check_copyright_holders()
+        missing_holders, extra_holders, star_file_map, holder_file_map = check_copyright_holders()
 
         # Restore originals
         stanzas.clear()
@@ -3569,7 +3670,8 @@ else:
                         globs = make_fix_globs(group_files,
                                                no_glob_dirs=_no_glob)
                         merged_cops = merge_copyrights(
-                            raw_cops, prefer_unicode=_unicode_pref)
+                            raw_cops, prefer_unicode=_unicode_pref,
+                            file_paths=group_files)
                         cop_field = format_copyright_field(merged_cops)
 
                         print(f"  ┌──────────────────────────────────────")
@@ -3605,6 +3707,38 @@ else:
                         else:
                             print(f"  ✗ Skipped.\n")
                     continue
+
+                # Check per-file attribution: if the holder was only
+                # detected in a minority of the stanza's files, don't
+                # add it to the shared stanza (it would misattribute).
+                # Find all files in the same stanza as glob_pat.
+                _my_cops = stanza_copyrights_now.get(glob_pat)
+                stanza_files_for_glob = set()
+                if _my_cops is not None:
+                    for g, l in stanzas_now:
+                        if stanza_copyrights_now.get(g) is _my_cops:
+                            stanza_files_for_glob.add(g)
+                if len(stanza_files_for_glob) > 1:
+                    # Multi-file stanza: check how many files actually
+                    # had the holder(s) detected.  Each file has its own
+                    # governing glob entry, so check every file in the
+                    # stanza against the holder_file_map.
+                    files_with_holder = set()
+                    for g in stanza_files_for_glob:
+                        for h in holders:
+                            if holder_file_map.get((g, h)):
+                                files_with_holder.add(g)
+                                break
+                    if files_with_holder and len(files_with_holder) < len(stanza_files_for_glob):
+                        # Holder only applies to a subset — skip
+                        print(f"  Stanza: Files: {glob_pat}")
+                        for h in cleaned:
+                            print(f"    ~ {h}  (detected in "
+                                  f"{len(files_with_holder)}/"
+                                  f"{len(stanza_files_for_glob)} "
+                                  f"stanza files — skipped)")
+                        print()
+                        continue
 
                 print(f"  Stanza: Files: {glob_pat}")
                 for h in cleaned:
