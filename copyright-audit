@@ -1543,6 +1543,33 @@ def get_declared_copyrights(filepath):
             best = stanza_copyrights.get(glob, [])
     return best
 
+# Corporate suffixes that should never start a new author entry
+# when preceded by a comma (e.g. "Company, Inc.").
+_CORP_SUFFIXES_RE = re.compile(
+    r'^(?:Inc|Ltd|LLC|LLP|GmbH|AG|Co|Corp|Pty|SA|SAS|BV|NV'
+    r'|Srl|SpA|KG|OHG|AB|AS|Oy|Bhd|Pte|SE|PLC|plc)\.?(?:\s|$)',
+    re.IGNORECASE)
+
+def _deobfuscate_email(s):
+    """Convert obfuscated emails to real ones and normalise brackets.
+
+    'chris at kohlhoff dot com'  → 'chris@kohlhoff.com'
+    '(user@example.com)'         → '<user@example.com>'
+    '(user at example dot com)'  → '<user@example.com>'
+    '(oliver dot kowalke@gmail.com)' → '<oliver.kowalke@gmail.com>'
+    """
+    # Deobfuscate "word at word dot word" patterns
+    def _deob(m):
+        return m.group(0).replace(' at ', '@').replace(' dot ', '.')
+    s = re.sub(r'\b\w[\w.+-]* at \w[\w.-]* dot \w+', _deob, s)
+    # Deobfuscate partial: "word dot word@domain" (has @ but still has ' dot ')
+    def _deob_partial(m):
+        return m.group(0).replace(' dot ', '.')
+    s = re.sub(r'\b\w[\w.+-]* dot \w[\w.+-]*@[\w.-]+', _deob_partial, s)
+    # Convert parenthesized email to angle brackets
+    s = re.sub(r'\(([\w.+-]+@[\w.-]+)\)', r'<\1>', s)
+    return s
+
 def _strip_email(s):
     """Remove <email> from a string."""
     return re.sub(r'\s*<[^>]*>', '', s).strip()
@@ -1609,17 +1636,56 @@ def _split_multi_authors(author_str):
     Handles patterns like:
       "Huw Wilkins, Cory Kontros,and Andrew Wedderburn"
       "John Smith and Jane Doe"
-      "Alice, Bob & Charlie"
+    But does NOT split location qualifiers like:
+      "Ableton AG, Berlin."  → kept as one holder
+      "Mega Limited, Auckland, New Zealand" → kept as one holder
     Returns a list of individual author strings.
     """
     if not author_str:
         return [author_str]
-    # Split on comma+and, comma+ampersand, standalone and/ampersand,
-    # or plain comma+space.  Order matters: longer patterns first.
-    parts = re.split(
-        r',\s*and\s+|,\s*&\s+|\s+and\s+|\s+&\s+|,\s+',
+
+    # When the string contains explicit "and"/"&", it is very likely
+    # a multi-author list, so use a stricter location threshold (1 word)
+    # to avoid merging real person names like "Steve Harris".
+    has_explicit_sep = bool(re.search(r'\band\b|&', author_str,
+                                      flags=re.IGNORECASE))
+    loc_max_words = 1 if has_explicit_sep else 2
+
+    # First split on explicit "and" / "&" separators — these always
+    # indicate distinct authors.
+    and_parts = re.split(
+        r',\s*and\s+|,\s*&\s+|\s+and\s+|\s+&\s+',
         author_str, flags=re.IGNORECASE)
-    result = [p.strip() for p in parts if p and len(p.strip()) > 1]
+    and_parts = [p.strip() for p in and_parts if p and p.strip()]
+
+    # Within each and-part, split on commas — but rejoin fragments
+    # that look like locations (no year, no email, few words).
+    result = []
+    for and_part in and_parts:
+        comma_parts = re.split(r',\s+', and_part)
+        comma_parts = [p.strip() for p in comma_parts
+                       if p and len(p.strip()) > 1]
+        if not comma_parts:
+            if and_part.strip():
+                result.append(and_part.strip())
+            continue
+        merged = [comma_parts[0]]
+        for p in comma_parts[1:]:
+            # Corporate suffixes (Inc., Ltd., etc.) always rejoin
+            if _CORP_SUFFIXES_RE.match(p.strip()):
+                merged[-1] += ", " + p
+                continue
+            clean = re.sub(r'(?i)\.\s*all\s+rights\s+reserved\.?', '', p)
+            clean = re.sub(r'[.\s]+$', '', clean).strip()
+            has_email = '<' in p or '@' in p
+            has_year = bool(re.search(r'\b\d{4}\b', p))
+            word_count = len(clean.split())
+            if not has_email and not has_year and word_count <= loc_max_words:
+                # Likely a location qualifier — rejoin with previous
+                merged[-1] += ", " + p
+            else:
+                merged.append(p)
+        result.extend(merged)
     return result if result else [author_str]
 
 def _infer_years_from_paths(paths):
@@ -1686,6 +1752,7 @@ def merge_copyrights(raw_list, prefer_unicode=None, file_paths=None):
     for raw in raw_list:
         if not raw or not raw.strip():
             continue
+        raw = _deobfuscate_email(raw)
         years, author = _parse_copyright(raw)
         if not author:
             continue
@@ -4258,6 +4325,146 @@ else:
                     print(f"  ✓ Consolidated.\n")
                 else:
                     print(f"  ✗ Skipped.\n")
+
+        # ── Fix 7: Normalize copyright lines ─────────────────────────
+        # Re-parse all stanzas and rebuild copyright lines with
+        # consistent formatting: year before holder, deobfuscated
+        # emails, angle brackets instead of parentheses.
+        fix7_count = 0
+        for para in working_text.split("\n\n"):
+            lines = para.split("\n")
+            has_files = any(l.strip().startswith("Files:") for l in lines)
+            if not has_files:
+                continue
+            # Collect raw copyright lines from the stanza
+            cop_lines_raw = []
+            in_cop = False
+            for line in lines:
+                if line.startswith("Copyright:"):
+                    val = line[10:].strip()
+                    if val:
+                        cop_lines_raw.append(val)
+                    in_cop = True
+                elif in_cop and line.startswith(" ") and line.strip():
+                    # Continuation lines: may start with ": " (double Copyright:)
+                    val = line.strip()
+                    if val.startswith(": "):
+                        val = val[2:].strip()
+                    if val.startswith("Copyright:"):
+                        val = val[10:].strip()
+                    if val:
+                        cop_lines_raw.append(val)
+                else:
+                    in_cop = False
+
+            if not cop_lines_raw:
+                continue
+
+            # Build the old copyright block exactly as it appears
+            old_cop_parts = []
+            in_cop = False
+            for line in lines:
+                if line.startswith("Copyright:"):
+                    old_cop_parts.append(line)
+                    in_cop = True
+                elif in_cop and line.startswith(" ") and line.strip():
+                    old_cop_parts.append(line)
+                else:
+                    in_cop = False
+            old_cop_block = "\n".join(old_cop_parts)
+
+            # Merge through our normalizer (handles year ordering,
+            # email deobfuscation, bracket fixes, dedup)
+            merged = merge_copyrights(cop_lines_raw, prefer_unicode=_unicode_pref)
+            new_cop_block = "Copyright: " + format_copyright_field(merged)
+
+            if old_cop_block != new_cop_block:
+                working_text = working_text.replace(old_cop_block, new_cop_block, 1)
+                fix7_count += 1
+
+        if fix7_count:
+            changes_made += 1
+            print(f"Normalized copyright lines in {fix7_count} stanza(s).\n")
+
+        # ── Fix 8: Replace inline license text for common licenses ───
+        # When a Files stanza has the full license body inline and
+        # the license is in /usr/share/common-licenses/, strip the
+        # inline text and ensure a standalone License: block exists.
+        _COMMON_LICENSES_FIX8 = {
+            "GPL-1", "GPL-1+", "GPL-2", "GPL-2+", "GPL-3", "GPL-3+",
+            "LGPL-2", "LGPL-2+", "LGPL-2.1", "LGPL-2.1+", "LGPL-3", "LGPL-3+",
+            "AGPL-3", "AGPL-3+",
+            "Apache-2.0", "MPL-1.1", "MPL-2.0",
+            "GFDL", "GFDL-1.1", "GFDL-1.1+", "GFDL-1.2", "GFDL-1.2+",
+            "GFDL-1.3", "GFDL-1.3+",
+            "Artistic", "BSD", "CC0-1.0",
+        }
+        fix8_count = 0
+        # Find file stanzas with inline license body for common licenses
+        new_paras = []
+        standalone_needed = set()
+        for para in working_text.split("\n\n"):
+            lines = para.split("\n")
+            has_files = any(l.strip().startswith("Files:") for l in lines)
+            if not has_files:
+                new_paras.append(para)
+                continue
+            # Find the License: line and check for inline body
+            lic_idx = None
+            lic_name = None
+            for idx, line in enumerate(lines):
+                if line.startswith("License:"):
+                    lic_val = line[8:].strip()
+                    lic_name = lic_val.split()[0] if lic_val else None
+                    lic_idx = idx
+                    break
+            if lic_idx is None or lic_name is None:
+                new_paras.append(para)
+                continue
+            # Check if there are continuation lines after License:
+            has_body = (lic_idx + 1 < len(lines)
+                        and lines[lic_idx + 1].startswith(" "))
+            if not has_body:
+                new_paras.append(para)
+                continue
+            # Only strip if it's a common license
+            if (lic_name not in _COMMON_LICENSES_FIX8
+                    and lic_name not in SYSTEM_COMMON_LICENSES):
+                new_paras.append(para)
+                continue
+            # Strip the inline body (continuation lines after License:)
+            trimmed = lines[:lic_idx + 1]
+            fix8_count += 1
+            standalone_needed.add(lic_name)
+            new_paras.append("\n".join(trimmed))
+
+        if fix8_count:
+            working_text = "\n\n".join(new_paras)
+            changes_made += 1
+            # Ensure standalone License: blocks exist for stripped licenses
+            for lic in sorted(standalone_needed):
+                # Check if a standalone block already exists
+                has_block = False
+                for block_para in working_text.split("\n\n"):
+                    block_lines = block_para.strip().split("\n")
+                    if not block_lines:
+                        continue
+                    first = block_lines[0]
+                    has_f = any(l.strip().startswith("Files:")
+                               for l in block_lines)
+                    if (first.startswith("License:") and not has_f
+                            and first[8:].strip().split()[0] == lic):
+                        has_block = True
+                        break
+                if not has_block:
+                    slug = lic.rstrip("+")
+                    block = (f"\nLicense: {lic}\n"
+                             f" On Debian systems, the full text of"
+                             f" this license can be found in\n"
+                             f" `/usr/share/common-licenses/{slug}'.\n")
+                    working_text = working_text.rstrip("\n") + "\n" + block
+            print(f"Replaced inline license text with common-licenses"
+                  f" reference in {fix8_count} stanza(s).\n")
 
         # ── Write result ─────────────────────────────────────────────
         if changes_made > 0:
