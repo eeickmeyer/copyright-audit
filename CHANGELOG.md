@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 ## 2026-03-21
 
 ### Added
+- Decopy-accelerated generate mode: when `decopy` is installed, generate
+  mode runs decopy to seed the initial `debian/copyright`, then
+  automatically switches to check+fix+yes to harden it with scanner
+  cross-validation, DEP-5 normalization, and license text fetching.
+  Falls back to the built-in generator when decopy is absent.
 - Snap packaging: `snap/snapcraft.yaml` with core24 base, classic
   confinement, bundling scancode-toolkit, licensecheck, and decopy
 - Loud license incompatibility banners in all three modes (generate,

@@ -5,6 +5,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 ## Features
 
 - **Three modes**: check (default), generate, and review
+- **Generate mode**: when `decopy` is installed, seeds the initial file with decopy, then automatically runs the full check+fix pipeline to harden it; falls back to built-in generation otherwise
 - **DEP-5 validation**: field ordering, whitespace, required fields
 - **License mismatch detection**: scanner results vs. declared stanzas
 - **Copyright holder auditing**: missing/extra authors with fuzzy matching, Unicode name preservation, and DEP-5-aware `Files: *` handling (proposes precise stanzas instead of polluting the catch-all)

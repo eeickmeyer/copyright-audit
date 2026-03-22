@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (~4 575 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (~4 620 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -17,18 +17,19 @@ interactive fixing.
 | 111–128 | Scanner detection | Prefers `scancode` → `licensecheck`; requires `python3` |
 | 130–156 | Temp dir & exclusions | Creates `$_WORKDIR`; builds default exclude list (VCS, build artifacts, copyright file itself) |
 | 158–213 | Run scanner | Invokes scancode (JSON output) or licensecheck (deb-machine text); optionally runs cross-validation scans (licensecheck as sanity check, decopy) |
-| 215–250 | Pass state to Python | Exports everything as env vars; launches `python3 -` heredoc |
+| 215–237 | Decopy-accelerated generation | If `generate` mode and `decopy` is installed, runs `decopy --quiet .` to seed the initial copyright file, then switches to `check` + `fix` + `yes` mode so the full hardening pipeline runs automatically |
+| 239–268 | Pass state to Python | Exports everything as env vars; launches `python3 -` heredoc |
 
 ---
 
-## Embedded Python (lines 251–4 576)
+## Embedded Python (lines 269–4 623)
 
-### Initialization & Configuration (lines 251–440)
+### Initialization & Configuration (lines 269–440)
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 251–268 | Env-var intake | Reads all exported variables into Python globals |
-| 270–277 | Native-package detection | `_is_native_package()` — reads `debian/source/format` |
+| 269–290 | Env-var intake | Reads all exported variables into Python globals (incl. `_decopy_generated` flag) |
+| 292–299 | Native-package detection | `_is_native_package()` — reads `debian/source/format` |
 | 282–300 | Built-in license texts | `_BUILTIN_LICENSE_TEXTS` dict (e.g. Unsplash license) |
 | 302–403 | License text fetcher | `fetch_license_text()`, `_fetch_cc_text()`, `_fetch_spdx_text()`, `_fetch_url()`, `format_license_body()` — downloads from SPDX API / Creative Commons |
 | 405–440 | Exclusion & metadata helpers | `is_excluded()`, `is_metadata_file()` — glob-matching utilities |
@@ -129,99 +130,109 @@ like "Rep Invariant Systems, Inc." on commas.
 
 ---
 
-## Mode: generate (lines 2365–2715)
+## Mode: generate (lines 2393–2740)
 
-Builds a new `debian/copyright` from scan results.
+Builds a new `debian/copyright` from scan results. **When `decopy` is
+installed**, the Bash wrapper runs decopy first to seed the file (lines
+215–237), then switches to check+fix+yes mode — so the generate path below
+is the fallback when decopy is absent.
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 2368–2430 | File grouping | Collects per-file data; counts licenses to pick catch-all; groups by (license, author-set) |
+| 2393–2430 | File grouping | Collects per-file data; counts licenses to pick catch-all; groups by (license, author-set) |
 | 2433–2495 | `smart_glob()` | Directory-aware glob generation with sibling merging |
 | 2496–2560 | Catch-all + per-author stanzas | Emits `Files: *` then per-author stanzas |
 | 2561–2620 | `debian/*` stanza proposal | Interactive prompt for packaging stanza (skipped for native packages) |
 | 2622–2680 | License text blocks | Common-licenses references, SPDX/CC fetching, FIXME stubs for unfetched |
-| 2682–2715 | Warnings & summary | Non-free detection, loud compatibility banner, file/stanza counts |
+| 2682–2740 | Warnings & summary | Non-free detection, loud compatibility banner, file/stanza counts |
 
 ---
 
-## Mode: check / review — Setup (lines 2718–2847)
+## Mode: check / review — Setup (lines 2743–2872)
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 2718–2770 | Load auxiliary results | Parses decopy output and licensecheck sanity-check results |
-| 2772–2812 | `run_sanity_check()` | Cross-validates scancode vs. licensecheck by license family |
-| 2814–2847 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
+| 2743–2795 | Load auxiliary results | Parses decopy output and licensecheck sanity-check results |
+| 2797–2837 | `run_sanity_check()` | Cross-validates scancode vs. licensecheck by license family |
+| 2839–2872 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
 
 ---
 
-## Mode: review (lines 2848–3155)
+## Mode: review (lines 2873–3180)
 
 Structured pass/fail report with 19 tests.
 
 | Test | Lines | What it checks |
 |------|-------|----------------|
-| 1 | 2859 | DEP-5 format validation |
-| 2 | 2877 | Catch-all `Files: *` stanza |
-| 3 | 2882 | License mismatches |
-| 4 | 2886 | Undeclared licenses |
-| 5 | 2903 | License compatibility (loud `!`-banner on failure) |
-| 6 | 2919 | Non-free licenses in source |
-| 7 | 2929 | Source files without license headers |
-| 8 | 2934 | License text completeness |
-| 9 | 2949 | Stanza coverage (uncovered files) |
-| 10 | 2964 | Stale stanza globs |
-| 11 | 2977 | Copyright holder accuracy |
-| 12 | 2993 | Decopy findings |
-| 13 | 3001 | Low-confidence detections |
-| 14 | 3009 | Stanza consolidation opportunities |
-| 15 | 3025 | FIXME entries in copyright file |
-| 16 | 3045 | Versionless / invalid license identifiers |
-| 17 | 3061 | Broad glob override conflicts |
-| 18 | 3090 | Duplicate file declarations |
-| 19 | 3110 | Scanner cross-validation (scancode vs. licensecheck) |
+| 1 | 2884 | DEP-5 format validation |
+| 2 | 2902 | Catch-all `Files: *` stanza |
+| 3 | 2907 | License mismatches |
+| 4 | 2911 | Undeclared licenses |
+| 5 | 2928 | License compatibility (loud `!`-banner on failure) |
+| 6 | 2944 | Non-free licenses in source |
+| 7 | 2954 | Source files without license headers |
+| 8 | 2959 | License text completeness |
+| 9 | 2974 | Stanza coverage (uncovered files) |
+| 10 | 2989 | Stale stanza globs |
+| 11 | 3002 | Copyright holder accuracy |
+| 12 | 3018 | Decopy findings |
+| 13 | 3026 | Low-confidence detections |
+| 14 | 3034 | Stanza consolidation opportunities |
+| 15 | 3050 | FIXME entries in copyright file |
+| 16 | 3070 | Versionless / invalid license identifiers |
+| 17 | 3086 | Broad glob override conflicts |
+| 18 | 3115 | Duplicate file declarations |
+| 19 | 3135 | Scanner cross-validation (scancode vs. licensecheck) |
 
-Ends with verdict (lines 3130–3155).
+Ends with verdict (lines 3155–3180).
 
 ---
 
-## Mode: check — Standard Report (lines 3155–3605)
+## Mode: check — Standard Report (lines 3180–3650)
+
+When entered via the decopy-accelerated generate path, stdout is redirected
+to stderr (line 3186) so the check report doesn't pollute the copyright output.
 
 | Section | Lines | Content |
 |---------|-------|---------|
-| 0 | 3164 | DEP-5 format validation |
-| 1 | 3182 | License mismatches — needs review |
-| 2 | 3215 | Likely false positives (informational) |
-| 3 | 3236 | License text completeness |
-| 4 | 3256 | License compatibility + non-free warnings (loud `!`-banner) |
-| 5 | 3299 | All licenses found in source |
-| 6 | 3310 | Stanza coverage analysis |
-| 7 | 3363 | Files with no detected license |
-| 8 | 3388 | Copyright holder accuracy |
-| 9 | 3418 | Stanza consolidation |
-| 10 | 3442 | Decopy findings |
-| 11 | 3454 | Scanner cross-validation |
-| 12 | 3473 | Low-confidence detections |
-| Summary | 3485 | Aggregate counts, result verdict |
+| 0 | 3197 | DEP-5 format validation |
+| 1 | 3215 | License mismatches — needs review |
+| 2 | 3248 | Likely false positives (informational) |
+| 3 | 3269 | License text completeness |
+| 4 | 3289 | License compatibility + non-free warnings (loud `!`-banner) |
+| 5 | 3332 | All licenses found in source |
+| 6 | 3343 | Stanza coverage analysis |
+| 7 | 3396 | Files with no detected license |
+| 8 | 3421 | Copyright holder accuracy |
+| 9 | 3451 | Stanza consolidation |
+| 10 | 3475 | Decopy findings |
+| 11 | 3487 | Scanner cross-validation |
+| 12 | 3506 | Low-confidence detections |
+| Summary | 3518 | Aggregate counts, result verdict |
 
 ---
 
-## Interactive Fix Mode (lines 3605–4575)
+## Interactive Fix Mode (lines 3650–4608)
 
-Entered via `--fix` flag or post-check prompt. Reads from `/dev/tty` for
-interactive input; supports `A` (yes to all) and `X` (no to all) batch answers.
+Entered via `--fix` flag, post-check prompt, or automatically when the
+decopy-accelerated generate path is active.
 
 | Fix | Lines | What it does |
 |-----|-------|--------------|
-| 0 | 3650 | Apply DEP-5 format fixes (whitespace, tabs, blank continuations) |
-| 1 | 3668 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
-| 2 | 3800 | Remove stale globs that match no file |
-| 3 | 3836 | Add missing standalone `License:` text blocks (common-licenses ref or SPDX fetch) |
-| 4 | 3907 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |
-| 5 | 4203 | Propose `debian/*` packaging stanza (or add packager to existing one) |
-| 6 | 4305 | Consolidate stanzas sharing same license + authors |
-| 7 | 4402 | Normalize copyright lines (year ordering, email deobfuscation, brackets) |
-| 8 | 4462 | Replace inline license text with `/usr/share/common-licenses/` references |
-| — | 4530 | Write result: backup `.bak`, write changes, warn about remaining FIXME stubs |
+| 0 | 3683 | Apply DEP-5 format fixes (whitespace, tabs, blank continuations) |
+| 1 | 3701 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
+| 2 | 3833 | Remove stale globs that match no file |
+| 3 | 3869 | Add missing standalone `License:` text blocks (common-licenses ref or SPDX fetch) |
+| 4 | 3940 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |
+| 5 | 4236 | Propose `debian/*` packaging stanza (or add packager to existing one) |
+| 6 | 4338 | Consolidate stanzas sharing same license + authors |
+| 7 | 4435 | Normalize copyright lines (year ordering, email deobfuscation, brackets) |
+| 8 | 4495 | Replace inline license text with `/usr/share/common-licenses/` references |
+| — | 4576 | Write result: backup `.bak`, write changes, warn about remaining FIXME stubs |
+
+After fix mode, if the decopy-accelerated generate path is active (lines
+4609–4620), stdout is restored and the hardened file is emitted to stdout
+(or confirmed at the `-o` path).
 
 ---
 
@@ -248,8 +259,8 @@ interactive input; supports `A` (yes to all) and `X` (no to all) batch answers.
 - **New license mapping**: Add to `SPDX_TO_DEP5` dict (~line 445)
 - **New non-free license**: Add to `_NONFREE_RAW` set (~line 2310)
 - **New metadata enrichment**: Add a loop after the SVG/KDE/GNOME blocks (~line 940)
-- **New review test**: Add after Test 19 in the review block (~line 3125); update verdict logic
-- **New check section**: Add after Section 12 in the check block (~line 3480); update summary
-- **New interactive fix**: Add as Fix 9 before the write-result block (~line 4530)
+- **New review test**: Add after Test 19 in the review block (~line 3150); update verdict logic
+- **New check section**: Add after Section 12 in the check block (~line 3510); update summary
+- **New interactive fix**: Add as Fix 9 before the write-result block (~line 4576)
 - **New compatibility rule**: Add to `check_license_compatibility()` (~line 1211)
 - **New false-positive category**: Add to `classify_fp()` (~line 2212) and `FP_LABELS` (~line 3186)
