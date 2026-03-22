@@ -12,7 +12,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **Automatic license fetching**: from SPDX and Creative Commons APIs
 - **Non-free / DFSG detection**: SSPL, BUSL, CC-NC, CC-ND, and more
 - **Coverage analysis**: uncovered files and stale globs
-- **Compatibility checks**: Apache + GPL-2-only, EPL + GPL, CDDL + GPL, etc.
+- **Compatibility checks**: Apache + GPL-2-only, EPL + GPL, CDDL + GPL, etc. — displayed with loud `!`-banner warnings
 - **Interactive fix mode**: proposes stanzas, removes stale globs, corrects formatting, adds missing holders and license text; normalizes year ordering and email addresses in existing stanzas; replaces inline license bodies for common licenses with `/usr/share/common-licenses/` references; each prompt accepts `A` (yes to all) or `X` (no to all) to batch-answer all remaining fixes
 - **Unresolved stub warning**: after writing, any remaining `FIXME`/`TODO`/`PLACEHOLDER` tokens are reported with their line numbers
 - **Email deobfuscation**: converts "alice at example dot com" and similar patterns to proper addresses; normalizes parenthesized emails to angle brackets
@@ -24,24 +24,40 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - `python3`
 - **ScanCode Toolkit** (recommended): `pip install scancode-toolkit`
 - Or **licensecheck** (basic): `apt install licensecheck`
+- Optional: **decopy** for cross-validation: `apt install decopy`
 - Optional: internet access for license text fetching (`--no-fetch` to disable)
+
+## Installation
+
+### Snap
+
+```bash
+snap install copyright-audit --classic
+```
+
+The snap bundles ScanCode Toolkit, licensecheck, and decopy.
+
+### Manual
+
+```bash
+chmod +x copyright-audit
+# Place on PATH or run directly
+```
 
 ## Usage
 
 ```bash
-chmod +x copyright-audit
-
 # Validate existing debian/copyright
-./copyright-audit [source-dir]
+copyright-audit [source-dir]
 
 # Generate a new copyright file
-./copyright-audit generate -o debian/copyright [source-dir]
+copyright-audit generate -o debian/copyright [source-dir]
 
 # Review for archive upload
-./copyright-audit review [source-dir]
+copyright-audit review [source-dir]
 
 # Auto-fix all issues
-./copyright-audit --fix --yes [source-dir]
+copyright-audit --fix --yes [source-dir]
 ```
 
 ### Options
@@ -56,6 +72,10 @@ chmod +x copyright-audit
 | `--no-fetch` | Skip license text downloads |
 | `-j, --jobs N` | Parallel ScanCode workers (default: nproc) |
 | `-h, --help` | Show help |
+
+## Contributing
+
+See [CODE_OUTLINE.md](CODE_OUTLINE.md) for a structural map of the script.
 
 ## License
 
