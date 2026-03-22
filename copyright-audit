@@ -2993,30 +2993,40 @@ if has_sanity_check:
 
 def run_sanity_check(tool_name, sanity_results):
     """Cross-validate primary scanner results against a secondary scanner.
-    Returns list of (path, primary_lics, secondary_lics) tuples where
-    the tools disagree on the detected license family."""
+    Returns list of (path, primary_dep5, secondary_dep5) tuples where
+    the tools disagree on the detected license family.
+    All identifiers are DEP-5-normalized for display."""
     if not sanity_results:
         return []
 
-    # Build lookup from primary scan results
+    # Build lookup from primary scan results (DEP-5 normalised)
     primary = {}
     for r in scan_results:
         fp = r["path"]
-        primary[fp] = set(r["licenses"])
+        primary[fp] = set(to_dep5(l) for l in r["licenses"] if l)
 
     discrepancies = []
     for fp, lc_lics in sanity_results.items():
         # Normalize path
         norm = "./" + fp.lstrip("./")
+        # Skip project-level license/copying/authors files — they
+        # describe the project as a whole and routinely differ between
+        # scanners without indicating a real problem.
+        _bn = os.path.basename(norm).lower()
+        if _bn in _LICENSE_FILE_NAMES or _bn in ("authors", "authors.txt",
+                                                   "contributors",
+                                                   "contributors.txt"):
+            continue
         sc_lics = primary.get(norm, set())
-        if not sc_lics and not lc_lics:
+        lc_dep5 = set(to_dep5(l) for l in lc_lics if l)
+        if not sc_lics and not lc_dep5:
             continue
         # Normalize for comparison: strip versions, lowercase
         def _family(lic):
             s = re.sub(r'[- ]\d[\d.]*\+?$', '', lic).strip()
             return s.lower().replace("-", "").replace("_", "").replace(" ", "")
         sc_families = {_family(l) for l in sc_lics if l}
-        lc_families = {_family(l) for l in lc_lics if l}
+        lc_families = {_family(l) for l in lc_dep5 if l}
         # Skip if either found nothing (one tool may not detect headers)
         if not sc_families or not lc_families:
             continue
@@ -3025,13 +3035,64 @@ def run_sanity_check(tool_name, sanity_results):
             discrepancies.append((
                 norm,
                 ", ".join(sorted(sc_lics)) or "(none)",
-                ", ".join(sorted(lc_lics)) or "(none)",
+                ", ".join(sorted(lc_dep5)) or "(none)",
             ))
     return discrepancies
 
 all_sanity_discrepancies = {}  # tool_name → [(path, primary_lics, secondary_lics)]
 for _st, _sr in all_sanity_results.items():
     all_sanity_discrepancies[_st] = run_sanity_check(_st, _sr)
+
+# ── Two-of-three consensus ───────────────────────────────────────────
+# When all three scanners ran, compute consensus: for each file flagged
+# by any pairwise comparison, check if two of three agree.  That file
+# is downgraded from a warning to informational.
+sanity_consensus = []   # [(path, {tool: lics, ...}, consensus_lic_or_None)]
+sanity_real_disc = []   # files where all three disagree
+
+if len(all_sanity_results) >= 2:
+    # Gather every path that ANY secondary flagged
+    _flagged_paths = set()
+    for _sd in all_sanity_discrepancies.values():
+        for fp, _, _ in _sd:
+            _flagged_paths.add(fp)
+
+    if _flagged_paths:
+        # Build per-tool DEP-5 license sets for every flagged path
+        _primary_lics = {}
+        for r in scan_results:
+            if r["path"] in _flagged_paths:
+                _primary_lics[r["path"]] = set(to_dep5(l) for l in r["licenses"] if l)
+
+        def _family(lic):
+            s = re.sub(r'[- ]\d[\d.]*\+?$', '', lic).strip()
+            return s.lower().replace("-", "").replace("_", "").replace(" ", "")
+
+        for fp in sorted(_flagged_paths):
+            tool_lics = {scanner: _primary_lics.get(fp, set())}
+            for _st, _sr in all_sanity_results.items():
+                raw = _sr.get(fp.lstrip("./"), _sr.get(fp, set()))
+                tool_lics[_st] = set(to_dep5(l) for l in raw if l) if raw else set()
+
+            # Compare families pairwise to find which tools agree
+            tools = list(tool_lics.keys())
+            _agreements = []
+            for i in range(len(tools)):
+                for j in range(i + 1, len(tools)):
+                    fi = {_family(l) for l in tool_lics[tools[i]] if l}
+                    fj = {_family(l) for l in tool_lics[tools[j]] if l}
+                    if fi and fj and (fi & fj):
+                        _agreements.append((tools[i], tools[j]))
+
+            if _agreements:
+                # At least two tools agree — pick the consensus license
+                _winner_pair = _agreements[0]
+                _consensus = ", ".join(sorted(
+                    tool_lics[_winner_pair[0]] & tool_lics[_winner_pair[1]]
+                )) or ", ".join(sorted(tool_lics[_winner_pair[0]]))
+                sanity_consensus.append((fp, tool_lics, _consensus))
+            else:
+                sanity_real_disc.append((fp, tool_lics))
 
 real_mismatches = defaultdict(list)
 fp_mismatches = defaultdict(list)
@@ -3343,21 +3404,34 @@ if mode == "review":
     else:
         print("[PASS] No duplicate file declarations")
 
-    # Test 19: Sanity check — cross-validate primary vs secondary scanners
+    # Test 19: Sanity check — cross-validate scanners
     if has_sanity_check:
-        for _st in sanity_tools:
-            _sd = all_sanity_discrepancies.get(_st, [])
-            if _sd:
-                print(f"[WARN] Scanner cross-validation ({scanner} vs {_st}): "
-                      f"{len(_sd)} discrepancy(ies)")
-                for fp, sc_l, lc_l in _sd[:5]:
-                    print(f"        {fp}")
-                    print(f"          {scanner}:{' ' * max(1, 14 - len(scanner))}{sc_l}")
-                    print(f"          {_st}:{' ' * max(1, 14 - len(_st))}{lc_l}")
-                if len(_sd) > 5:
-                    print(f"        ... and {len(_sd) - 5} more")
-            else:
-                print(f"[PASS] Scanner cross-validation: {scanner} and {_st} agree")
+        if sanity_real_disc:
+            # Files where all scanners disagree
+            print(f"[WARN] Scanner cross-validation: "
+                  f"{len(sanity_real_disc)} file(s) where all scanners disagree")
+            for fp, tool_lics in sanity_real_disc[:5]:
+                print(f"        {fp}")
+                for _t, _l in sorted(tool_lics.items()):
+                    _ls = ", ".join(sorted(_l)) or "(none)"
+                    print(f"          {_t}:{' ' * max(1, 14 - len(_t))}{_ls}")
+            if len(sanity_real_disc) > 5:
+                print(f"        ... and {len(sanity_real_disc) - 5} more")
+        if sanity_consensus:
+            # Files where 2-of-3 agree — informational only
+            print(f"[INFO] Scanner cross-validation: "
+                  f"{len(sanity_consensus)} file(s) resolved by 2-of-3 consensus")
+            for fp, tool_lics, consensus in sanity_consensus[:3]:
+                print(f"        {fp}  →  {consensus}")
+                for _t, _l in sorted(tool_lics.items()):
+                    _ls = ", ".join(sorted(_l)) or "(none)"
+                    print(f"          {_t}:{' ' * max(1, 14 - len(_t))}{_ls}")
+            if len(sanity_consensus) > 3:
+                print(f"        ... and {len(sanity_consensus) - 3} more")
+        if not sanity_real_disc and not sanity_consensus:
+            _tool_names = " and ".join(sanity_tools)
+            print(f"[PASS] Scanner cross-validation: "
+                  f"{scanner}, {_tool_names} agree")
     else:
         print("[INFO] Scanner cross-validation skipped (no secondary scanner available)")
 
@@ -3488,16 +3562,22 @@ if mode == "review":
                 ef.write("\n")
 
             if has_sanity_check:
-                for _st in sanity_tools:
-                    _sd = all_sanity_discrepancies.get(_st, [])
-                    if _sd:
-                        ef.write(f"SCANNER CROSS-VALIDATION: {scanner} vs {_st} ({len(_sd)})\n")
-                        ef.write("-" * 78 + "\n")
-                        for fp, sc_l, lc_l in _sd:
-                            ef.write(f"  {fp}\n")
-                            ef.write(f"    {scanner}: {sc_l}\n")
-                            ef.write(f"    {_st}: {lc_l}\n")
-                        ef.write("\n")
+                if sanity_real_disc:
+                    ef.write(f"SCANNER CROSS-VALIDATION — ALL DISAGREE ({len(sanity_real_disc)})\n")
+                    ef.write("-" * 78 + "\n")
+                    for fp, tool_lics in sanity_real_disc:
+                        ef.write(f"  {fp}\n")
+                        for _t, _l in sorted(tool_lics.items()):
+                            ef.write(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}\n")
+                    ef.write("\n")
+                if sanity_consensus:
+                    ef.write(f"SCANNER CROSS-VALIDATION — 2-OF-3 CONSENSUS ({len(sanity_consensus)})\n")
+                    ef.write("-" * 78 + "\n")
+                    for fp, tool_lics, consensus in sanity_consensus:
+                        ef.write(f"  {fp}  →  {consensus}\n")
+                        for _t, _l in sorted(tool_lics.items()):
+                            ef.write(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}\n")
+                    ef.write("\n")
 
         print(f"Full findings exported to: {export_file}")
 
@@ -3809,22 +3889,25 @@ else:
     if has_sanity_check:
         print("=" * W)
         print("SECTION 11: SCANNER CROSS-VALIDATION (sanity check)")
-        tools_str = ", ".join(sanity_tools)
-        print(f"{scanner} vs {tools_str} — files where tools disagree on license")
+        _all_tools = [scanner] + sanity_tools
+        print(f"{' vs '.join(_all_tools)} — files where tools disagree on license")
         print("=" * W)
-        _any_disc = False
-        for _st in sanity_tools:
-            _sd = all_sanity_discrepancies.get(_st, [])
-            if _sd:
-                _any_disc = True
-                print(f"\n{len(_sd)} file(s) where {scanner} and {_st} disagree:\n")
-                for fp, sc_l, lc_l in _sd:
-                    print(f"  {fp}")
-                    print(f"    {scanner}: {sc_l}")
-                    print(f"    {_st}: {lc_l}")
-                print()
-                print("  These files may warrant manual inspection.")
-        if not _any_disc:
+        if sanity_real_disc:
+            print(f"\n{len(sanity_real_disc)} file(s) where ALL scanners disagree:\n")
+            for fp, tool_lics in sanity_real_disc:
+                print(f"  {fp}")
+                for _t, _l in sorted(tool_lics.items()):
+                    print(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}")
+            print()
+            print("  These files may warrant manual inspection.")
+        if sanity_consensus:
+            print(f"\n{len(sanity_consensus)} file(s) resolved by 2-of-3 consensus:\n")
+            for fp, tool_lics, consensus in sanity_consensus:
+                print(f"  {fp}  →  {consensus}")
+                for _t, _l in sorted(tool_lics.items()):
+                    print(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}")
+            print()
+        if not sanity_real_disc and not sanity_consensus:
             print(f"\nNo discrepancies — all scanners agree on all files.")
         print()
 
@@ -3862,8 +3945,10 @@ else:
     if consol_groups:
         print(f"  Stanzas consolidatable:                {consol_saving} (in {len(consol_groups)} group(s))")
     if has_sanity_check:
-        _total_disc = sum(len(d) for d in all_sanity_discrepancies.values())
-        print(f"  Scanner cross-validation discrepancies: {_total_disc}")
+        if sanity_real_disc:
+            print(f"  Scanner cross-validation (all disagree): {len(sanity_real_disc)}")
+        if sanity_consensus:
+            print(f"  Scanner cross-validation (2-of-3 ok):  {len(sanity_consensus)}")
 
     total_issues = real_count + len(src_uncovered) + len(stale) + len(dep5_errors)
     if total_issues == 0:

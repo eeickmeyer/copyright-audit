@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (4 952 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (5 037 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -149,17 +149,18 @@ is the fallback when decopy is absent.
 
 ---
 
-## Mode: check / review — Setup (lines 2743–2872)
+## Mode: check / review — Setup (lines 2942–3100)
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 2743–2795 | Load auxiliary results | `_parse_dep5_sanity()` parses DEP-5 output from each available secondary scanner into `all_sanity_results` dict |
-| 2797–2835 | `run_sanity_check()` | Cross-validates primary vs. one secondary scanner by license family; called once per secondary tool, results stored in `all_sanity_discrepancies` |
-| 2837–2872 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
+| 2942–2992 | Load auxiliary results | `_parse_dep5_sanity()` parses DEP-5 output from each available secondary scanner into `all_sanity_results` dict |
+| 2994–3041 | `run_sanity_check()` | Cross-validates primary vs. one secondary scanner by license family; both sides DEP-5-normalized via `to_dep5()`; skips project-level metadata files (LICENSE, COPYING, AUTHORS, CONTRIBUTORS); called once per secondary tool, results stored in `all_sanity_discrepancies` |
+| 3046–3096 | Two-of-three consensus | When ≥2 secondary scanners ran, gathers all flagged paths, compares license families pairwise across tools; files where ≥2 agree → `sanity_consensus` (INFO); files where all disagree → `sanity_real_disc` (WARN) |
+| 3097–3100 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
 
 ---
 
-## Mode: review (lines 2873–3180)
+## Mode: review (lines 3133–3583)
 
 Structured pass/fail report with 19 tests.
 
@@ -183,13 +184,13 @@ Structured pass/fail report with 19 tests.
 | 16 | 3100 | Versionless / invalid license identifiers |
 | 17 | 3116 | Broad glob override conflicts |
 | 18 | 3145 | Duplicate file declarations |
-| 19 | 3165 | Scanner cross-validation (primary vs. secondary) |
+| 19 | 3408 | Scanner cross-validation (2-of-3 consensus: WARN for all-disagree, INFO for consensus, PASS when all agree) |
 
 Ends with verdict (lines 3185–3210), detailed mismatch appendix (lines 3197–3209), and optional `--export` full-detail findings writer (lines 3210–3316).
 
 ---
 
-## Mode: check — Standard Report (lines 3180–3650)
+## Mode: check — Standard Report (lines 3584–3981)
 
 When entered via the decopy-accelerated generate path, stdout is redirected
 to stderr (line 3186) so the check report doesn't pollute the copyright output.
@@ -207,13 +208,13 @@ to stderr (line 3186) so the check report doesn't pollute the copyright output.
 | 8 | 3421 | Copyright holder accuracy |
 | 9 | 3451 | Stanza consolidation |
 | 10 | 3475 | Decopy findings |
-| 11 | 3487 | Scanner cross-validation (primary vs. secondary) |
+| 11 | 3888 | Scanner cross-validation (all-disagree + 2-of-3 consensus subsections) |
 | 12 | 3506 | Low-confidence detections |
 | Summary | 3518 | Aggregate counts, result verdict |
 
 ---
 
-## Interactive Fix Mode (lines 3570–4608)
+## Interactive Fix Mode (lines 3982–5035)
 
 Entered via `--fix` flag, post-check prompt, or automatically when the
 decopy-accelerated generate path is active.
@@ -251,7 +252,7 @@ Snap Store. Key design decisions:
 | Serial pool patch | `scancode/pool.py` is replaced at build time with a serial executor to avoid `multiprocessing.Pool` semaphore blocks under strict confinement |
 | Runtime deps | `python3`, `git`, `sed`, `coreutils`, `licensecheck`, `decopy`, `libgomp1` |
 | Lint ignores | `ctypes`-loaded `.so` files from `extractcode_libarchive`, `typecode_libmagic`, and `libgomp` |
-| Environment | `PATH`, `PYTHONPATH`, `PERL5LIB`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR` all set to resolve in-snap paths |
+| Environment | `PATH`, `PYTHONPATH`, `PYTHONUNBUFFERED`, `PERL5LIB`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR` all set to resolve in-snap paths |
 
 ---
 
@@ -267,6 +268,10 @@ Snap Store. Key design decisions:
 | `SPDX_TO_DEP5` | `dict` | Const | 130+ scanner-output → DEP-5 name mappings |
 | `_NONFREE_RAW` | `set` | Const | Non-free/non-DFSG license identifiers |
 | `SOURCE_EXTS` | `set` | Const | Recognized source file extensions |
+| `all_sanity_results` | `dict` | Global | `{tool_name: {path: set(licenses)}}` secondary scanner results |
+| `all_sanity_discrepancies` | `dict` | Global | `{tool_name: [(path, primary_lics, secondary_lics)]}` pairwise disagreements |
+| `sanity_consensus` | `list[tuple]` | Global | `(path, {tool: lics}, consensus_lic)` — files where ≥2 of 3 scanners agree |
+| `sanity_real_disc` | `list[tuple]` | Global | `(path, {tool: lics})` — files where all scanners disagree |
 | `SYSTEM_COMMON_LICENSES` | `set` | Global | Licenses in `/usr/share/common-licenses/` (host or `$SNAP` fallback) |
 | `_path_to_result` | `dict` | Global | Fast path→scan_result lookup for enrichment |
 | `_unicode_pref` | `dict` | Fix mode | Preferred Unicode author name variants |

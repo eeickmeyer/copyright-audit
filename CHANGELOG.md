@@ -20,6 +20,11 @@ All notable changes to this project are documented in this file.
   the primary cross-validates against each secondary independently
   (e.g. scancode vs licensecheck AND scancode vs decopy). All
   reporting labels dynamically reflect the actual scanner pairs
+- Two-of-three consensus in cross-validation: when all three scanners
+  ran and a file is flagged by pairwise comparison, the tool checks
+  whether any two scanners agree on the license family. If so, the
+  file is downgraded from `[WARN]` to `[INFO]` ("2-of-3 consensus");
+  only files where all three disagree remain `[WARN]`
 - XMP metadata enrichment for raster images: extracts `dc:creator`,
   `cc:license`, `dc:rights`, `xmpRights:WebStatement`,
   `photoshop:Credit`, and `xmp:CreateDate` from embedded XMP packets
@@ -43,6 +48,14 @@ All notable changes to this project are documented in this file.
   holders (common for icon themes and data-only projects) are now
   `[INFO]` instead of `[WARN]`, with the note "normal for files
   without embedded headers"; undeclared holders remain `[WARN]`
+- Cross-validation now displays DEP-5 normalized license identifiers
+  (e.g. `GPL-3` instead of `GPL-3.0-only`) on both primary and
+  secondary sides for consistent, readable output
+- Cross-validation skips project-level metadata files (LICENSE, COPYING,
+  AUTHORS, CONTRIBUTORS) that routinely differ between scanners without
+  indicating a real problem
+- Snap: `PYTHONUNBUFFERED=1` added to snap environment so tqdm-based
+  progress bars (e.g. from decopy) are visible in strict confinement
 
 ## 2026-03-21
 

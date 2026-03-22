@@ -44,6 +44,7 @@ apps:
     environment:
       PATH: $SNAP/scancode/bin:$SNAP/usr/bin:$SNAP/bin:$PATH
       PYTHONPATH: $SNAP/scancode/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages
+      PYTHONUNBUFFERED: "1"
       PERL5LIB: $SNAP/usr/share/perl5:$SNAP/usr/lib/x86_64-linux-gnu/perl5/5.38
       GIT_EXEC_PATH: $SNAP/usr/lib/git-core
       GIT_TEMPLATE_DIR: $SNAP/usr/share/git-core/templates
