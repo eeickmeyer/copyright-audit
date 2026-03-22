@@ -16,12 +16,38 @@ description: |
   fetching from SPDX and Creative Commons APIs, interactive fix mode,
   and 130+ SPDX-to-DEP-5 license mappings.
 license: GPL-3.0+
+title: Copyright Audit
+contact: https://github.com/eeickmeyer/copyright-audit/issues
+issues: https://github.com/eeickmeyer/copyright-audit/issues
+source-code: https://github.com/eeickmeyer/copyright-audit
+website: https://github.com/eeickmeyer/copyright-audit
+donation: https://ubuntustudio.org/contribute
 grade: stable
-confinement: classic
+confinement: strict
+
+lint:
+  ignore:
+    # These .so files are loaded at runtime via ctypes.CDLL() by scancode,
+    # which the static library linter cannot detect.
+    - library:
+        - scancode/lib/python3.12/site-packages/extractcode_libarchive/lib/*
+        - scancode/lib/python3.12/site-packages/typecode_libmagic/lib/*
+        - usr/lib/x86_64-linux-gnu/libgomp.so*
 
 apps:
   copyright-audit:
     command: bin/copyright-audit
+    plugs:
+      - home
+      - removable-media
+      - network
+      - shared-memory
+    environment:
+      PATH: $SNAP/scancode/bin:$SNAP/usr/bin:$SNAP/bin:$PATH
+      PYTHONPATH: $SNAP/scancode/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages
+      PERL5LIB: $SNAP/usr/share/perl5:$SNAP/usr/lib/x86_64-linux-gnu/perl5/5.38
+      GIT_EXEC_PATH: $SNAP/usr/lib/git-core
+      GIT_TEMPLATE_DIR: $SNAP/usr/share/git-core/templates
 
 parts:
   copyright-audit:
@@ -31,16 +57,27 @@ parts:
       copyright-audit: bin/copyright-audit
     stage:
       - bin/copyright-audit
+
   scancode-toolkit:
-    plugin: python
-    source: .
-    python-packages:
-      - scancode-toolkit
+    plugin: nil
     build-packages:
       - python3-dev
+      - python3-venv
       - gcc
-  licensecheck:
+    override-build: |
+      python3 -m venv "${SNAPCRAFT_PART_INSTALL}/scancode"
+      "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install --upgrade pip
+      "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install scancode-toolkit
+      find "${SNAPCRAFT_PART_INSTALL}/scancode/bin" -maxdepth 1 -type f -exec \
+        sed -i '1s|^#!.*python.*$|#!/usr/bin/env python3|' {} +
+
+  runtime-deps:
     plugin: nil
     stage-packages:
+      - python3
+      - git
+      - sed
+      - coreutils
       - licensecheck
       - decopy
+      - libgomp1
