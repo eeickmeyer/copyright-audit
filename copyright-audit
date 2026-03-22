@@ -2335,6 +2335,25 @@ def is_nonfree(license_id):
     return False
 
 # ══════════════════════════════════════════════════════════════════════
+# Helper: warn about unresolved stubs in written output
+# ══════════════════════════════════════════════════════════════════════
+def _warn_stubs(text, dest):
+    """Print a loud warning if the output contains unresolved FIXME/TODO stubs."""
+    stub_re = re.compile(r'\b(FIXME|TODO|PLACEHOLDER)\b', re.IGNORECASE)
+    stub_lines = [(i + 1, ln) for i, ln in enumerate(text.splitlines())
+                  if stub_re.search(ln)]
+    if not stub_lines:
+        return
+    bar = "!" * 60
+    print(f"\n{bar}", file=sys.stderr)
+    print(f"  WARNING: {len(stub_lines)} unresolved stub(s) in {dest}",
+          file=sys.stderr)
+    print(bar, file=sys.stderr)
+    for lineno, ln in stub_lines:
+        print(f"  Line {lineno:4d}: {ln.strip()}", file=sys.stderr)
+    print(f"{bar}\n", file=sys.stderr)
+
+# ══════════════════════════════════════════════════════════════════════
 # MODE: generate — build a debian/copyright from scan results
 # ══════════════════════════════════════════════════════════════════════
 if mode == "generate":
@@ -2644,6 +2663,7 @@ if mode == "generate":
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(result)
         print(f"Generated copyright written to: {output_file}", file=sys.stderr)
+        _warn_stubs(result, output_file)
     else:
         print(result)
 
@@ -3474,12 +3494,15 @@ else:
         elif sys.stderr.isatty():
             try:
                 _offer_tty = open("/dev/tty", "r")
-                sys.stderr.write("  Run interactive fix mode now? [y/N] ")
+                sys.stderr.write("  Run interactive fix mode now? [y/N/A(yes to all)] ")
                 sys.stderr.flush()
                 offer_ans = _offer_tty.readline().rstrip("\n").strip().lower()
                 _offer_tty.close()
                 if offer_ans in ("y", "yes"):
                     fix_mode = True
+                elif offer_ans in ("a", "all"):
+                    fix_mode = True
+                    yes_mode = True
             except OSError:
                 pass
 
@@ -3491,6 +3514,7 @@ else:
         print("INTERACTIVE FIX MODE")
         print("=" * W)
         print()
+        print("  (In each prompt: A = yes to all remaining  |  X = no to all remaining)\n")
 
         # input() won't work — stdin is the heredoc.
         # Read interactive answers from /dev/tty instead.
@@ -3507,18 +3531,42 @@ else:
         import functools
         print = functools.partial(print, flush=True)
 
-        def ask(prompt):
-            """Prompt the user and read from /dev/tty."""
+        _batch_ans = [None]  # None = no all-choice; True = yes-to-all; False = no-to-all
+
+        def ask(prompt, batch=False):
+            """Prompt the user and read from /dev/tty.
+
+            When batch=True, the response 'A' sets yes-to-all for all future
+            batch prompts, and 'X' sets no-to-all.
+            """
             if yes_mode:
                 sys.stdout.write(prompt + "y (--yes)\n")
                 sys.stdout.flush()
                 return "y"
+            if batch:
+                if _batch_ans[0] is True:
+                    sys.stdout.write(prompt + "y (yes to all)\n")
+                    sys.stdout.flush()
+                    return "y"
+                if _batch_ans[0] is False:
+                    sys.stdout.write(prompt + "n (no to all)\n")
+                    sys.stdout.flush()
+                    return "n"
             sys.stdout.write(prompt)
             sys.stdout.flush()
             try:
-                return _tty.readline().rstrip("\n")
+                ans = _tty.readline().rstrip("\n")
             except EOFError:
                 return ""
+            if batch:
+                al = ans.strip().lower()
+                if al in ("a", "all"):
+                    _batch_ans[0] = True
+                    return "y"
+                if al in ("x", "none"):
+                    _batch_ans[0] = False
+                    return "n"
+            return ans
 
         # Read the current copyright file
         with open(copyright_file, encoding="utf-8") as f:
@@ -3582,7 +3630,7 @@ else:
                 prefix = f"Line {lnum}: " if lnum > 0 else ""
                 print(f"  [{sev.upper()}] {prefix}{msg}")
 
-            answer = ask("\n  Apply DEP-5 format fixes? [y/N] ").strip().lower()
+            answer = ask("\n  Apply DEP-5 format fixes? [y/N/A/X] ", batch=True).strip().lower()
             if answer in ("y", "yes"):
                 working_text, fix_descs = fix_dep5_format(working_text)
                 for desc in fix_descs:
@@ -3690,7 +3738,7 @@ else:
                 print(f"  │ License: {det_lic}")
                 print(f"  └──────────────────────────────────────")
 
-                answer = ask("  Add this stanza? [y/N/e(dit)] ").strip().lower()
+                answer = ask("  Add this stanza? [y/N/e(dit)/A/X] ", batch=True).strip().lower()
 
                 if answer in ("y", "yes"):
                     # Build the stanza text
@@ -3729,7 +3777,7 @@ else:
             print(f"{len(stale)} stale glob(s) found that match no file:\n")
             for glob_pat, lic in stale:
                 print(f"  Stale: {glob_pat}  (License: {lic})")
-            answer = ask("\n  Remove all stale globs? [y/N] ").strip().lower()
+            answer = ask("\n  Remove all stale globs? [y/N/A/X] ", batch=True).strip().lower()
             if answer in ("y", "yes"):
                 for glob_pat, lic in stale:
                     escaped = re.escape(glob_pat)
@@ -3823,7 +3871,7 @@ else:
                                  f" FIXME: Add the full license text here.\n")
                         print(f"  {lic} → FIXME stub (you must add the full text)")
 
-                answer = ask(f"  Add License block for {lic}? [y/N] ").strip().lower()
+                answer = ask(f"  Add License block for {lic}? [y/N/A/X] ", batch=True).strip().lower()
                 if answer in ("y", "yes"):
                     working_text = working_text.rstrip("\n") + "\n" + block
                     changes_made += 1
@@ -4016,7 +4064,7 @@ else:
                         print(f"  └──────────────────────────────────────")
 
                         answer = ask(
-                            "  Add this stanza? [y/N] ").strip().lower()
+                            "  Add this stanza? [y/N/A/X] ", batch=True).strip().lower()
                         if answer in ("y", "yes"):
                             files_str = format_files_field(globs)
                             stanza_text = (
@@ -4068,7 +4116,7 @@ else:
                 print(f"  Stanza: Files: {glob_pat}")
                 for h in cleaned:
                     print(f"    + {h}")
-                answer = ask(f"  Add missing holder(s) to this stanza? [y/N] ").strip().lower()
+                answer = ask(f"  Add missing holder(s) to this stanza? [y/N/A/X] ", batch=True).strip().lower()
                 if answer in ("y", "yes"):
                     escaped_glob = re.escape(glob_pat)
                     # Find the stanza containing this glob anywhere in
@@ -4157,7 +4205,7 @@ else:
             print(f"  │ License: {deb_lic}")
             print(f"  └──────────────────────────────────────")
 
-            answer = ask("  Add this stanza? [Y/n/e(dit)] ").strip().lower()
+            answer = ask("  Add this stanza? [Y/n/e(dit)/A/X] ", batch=True).strip().lower()
             if answer in ("e", "edit"):
                 print(f"  Enter copyright holder (or press Enter to keep):")
                 new_cop = ask(f"    Copyright [{deb_cop}]: ").strip()
@@ -4193,7 +4241,7 @@ else:
             if not packager_found:
                 print(f"Current packager not found in debian/* copyright holders:")
                 print(f"    {packager_cop}\n")
-                answer = ask("  Add yourself to the debian/* stanza? [Y/n/e(dit)] ").strip().lower()
+                answer = ask("  Add yourself to the debian/* stanza? [Y/n/e(dit)/A/X] ", batch=True).strip().lower()
                 if answer in ("e", "edit"):
                     print("  Enter copyright line (or press Enter to keep):")
                     new_cop = ask(f"    Copyright [{packager_cop}]: ").strip()
@@ -4273,8 +4321,8 @@ else:
                         files_preview += f" ... (+{len(ps['files'])-2})"
                     print(f"    • Files: {files_preview}")
 
-                answer = ask("\n  Consolidate these stanzas? [y/N] "
-                             ).strip().lower()
+                answer = ask("\n  Consolidate these stanzas? [y/N/A/X] ",
+                             batch=True).strip().lower()
                 if answer in ("y", "yes"):
                     # Build the merged stanza text
                     # Build directory file counts from all stanzas
@@ -4484,6 +4532,7 @@ else:
                     f.write(working_text)
                 print(f"\n  ✓ Written to {copyright_file}")
                 print(f"  ✓ Backup saved to {backup}")
+                _warn_stubs(working_text, copyright_file)
             else:
                 # Offer to write to a different file
                 alt = ask("  Write to alternate file instead? [path or Enter to discard] ").strip()
@@ -4491,6 +4540,7 @@ else:
                     with open(alt, "w", encoding="utf-8") as f:
                         f.write(working_text)
                     print(f"  ✓ Written to {alt}")
+                    _warn_stubs(working_text, alt)
                 else:
                     print("  Changes discarded.")
         else:

@@ -23,6 +23,13 @@ All notable changes to this project are documented in this file.
   for licenses available under `/usr/share/common-licenses/` are
   replaced with a short reference, and a standalone `License:` block
   with the common-licenses path is added if not already present
+- Yes-to-all / No-to-all in interactive fix mode: each prompt now
+  accepts `A` (yes to all remaining) and `X` (no to all remaining);
+  the end-of-check offer also accepts `A` to enter fix mode with all
+  prompts auto-accepted
+- Unresolved stub warning: after writing any copyright file, a loud
+  warning lists every line that still contains a `FIXME`, `TODO`, or
+  `PLACEHOLDER` token
 
 ### Fixed
 - Duplicate stanzas: Fix 1 no longer proposes new stanzas for files
