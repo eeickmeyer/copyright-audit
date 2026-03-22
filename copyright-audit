@@ -41,7 +41,7 @@
 # Scanner preference (automatic):
 #   1. scancode  — SPDX database, highest accuracy (pip install scancode-toolkit)
 #   2. licensecheck + decopy — Debian-native tools (apt install licensecheck
-#      python3-decopy)
+#      decopy)
 #
 # If source-dir is omitted, the current directory is used.
 # Requires: python3
