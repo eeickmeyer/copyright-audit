@@ -21,7 +21,7 @@
 # a new debian/copyright, check an existing one, or produce a reviewer report.
 #
 # Usage:
-#   copyright-check.sh [mode] [options] [source-dir]
+#   copyright-audit [mode] [options] [source-dir]
 #
 # Modes:
 #   check      Validate existing debian/copyright (default)
@@ -170,7 +170,7 @@ if [[ "$SCANNER" == "scancode" ]]; then
     done
     # ScanCode needs a real TTY on stderr for its progress bar.
     # Let stderr go straight to the terminal; capture exit status only.
-    scancode "${SC_ARGS[@]}" . ; _sc_rc=$?
+    scancode "${SC_ARGS[@]}" . && _sc_rc=0 || _sc_rc=$?
     if [[ $_sc_rc -ne 0 ]]; then
         echo "Warning: ScanCode exited with code $_sc_rc. Results may be incomplete." >&2
     fi
@@ -604,8 +604,14 @@ low_confidence = []  # [(path, license, score)]
 MIN_CONFIDENCE = 50  # Minimum ScanCode match score to trust
 
 if scanner == "scancode":
-    with open(scan_file, encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(scan_file, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"Error: Failed to parse ScanCode output: {exc}", file=sys.stderr)
+        print("  The scan may have been interrupted or produced invalid output.", file=sys.stderr)
+        print("  Try re-running or check the ScanCode installation.", file=sys.stderr)
+        sys.exit(1)
     # ScanCode scanning "." prefixes all paths with the directory basename.
     # Detect and strip this prefix so paths are relative to the source root.
     _sc_prefix = ""
@@ -822,8 +828,7 @@ _PUBLIC_DOMAIN_URLS = {
 def _cc_url_to_dep5(url):
     """Convert a Creative Commons license URL to a DEP-5 identifier."""
     url_lower = url.lower().rstrip("/") + "/"
-    if url_lower.rstrip("/") + "/" in _PUBLIC_DOMAIN_URLS or \
-       url_lower in _PUBLIC_DOMAIN_URLS:
+    if url_lower in _PUBLIC_DOMAIN_URLS:
         if "zero" in url_lower:
             return "CC0-1.0"
         return "Public-Domain"
@@ -1700,17 +1705,21 @@ def _infer_years_from_paths(paths):
     if git_ok and paths:
         try:
             clean = [p.lstrip("./") for p in paths if p]
-            result = subprocess.run(
-                ["git", "log", "--follow", "--diff-filter=A",
-                 "--format=%ai", "--"] + clean,
-                capture_output=True, text=True, timeout=10)
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line and len(line) >= 4:
-                    try:
-                        years.add(int(line[:4]))
-                    except ValueError:
-                        pass
+            # Process in batches to avoid OS argument length limits
+            _BATCH = 200
+            for _bi in range(0, len(clean), _BATCH):
+                _chunk = clean[_bi:_bi + _BATCH]
+                result = subprocess.run(
+                    ["git", "log", "--follow", "--diff-filter=A",
+                     "--format=%ai", "--"] + _chunk,
+                    capture_output=True, text=True, timeout=10)
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line and len(line) >= 4:
+                        try:
+                            years.add(int(line[:4]))
+                        except ValueError:
+                            pass
         except (OSError, subprocess.TimeoutExpired):
             pass
     # Fall back to mtime for files we couldn't get git info for
@@ -2374,6 +2383,9 @@ if mode == "generate":
     lic_counts = defaultdict(int)
     for e in file_entries:
         lic_counts[e["lic"]] += 1
+    if not lic_counts:
+        print("No licenses detected in any file. Nothing to generate.", file=sys.stderr)
+        sys.exit(1)
     biggest_key = max(lic_counts, key=lambda k: lic_counts[k])
 
     def _copyright_holder_key(cop):
@@ -3426,7 +3438,7 @@ else:
     # Scanner cross-validation (sanity check)
     if has_sanity_check:
         print("=" * W)
-        print("SECTION 12: SCANNER CROSS-VALIDATION (sanity check)")
+        print("SECTION 11: SCANNER CROSS-VALIDATION (sanity check)")
         print("scancode vs licensecheck — files where tools disagree on license")
         print("=" * W)
         if sanity_discrepancies:
@@ -3445,7 +3457,7 @@ else:
     # Low-confidence detections (scancode only)
     if low_confidence:
         print("=" * W)
-        print("SECTION 13: LOW-CONFIDENCE DETECTIONS (skipped)")
+        print("SECTION 12: LOW-CONFIDENCE DETECTIONS (skipped)")
         print("=" * W)
         print(f"\n{len(low_confidence)} detection(s) below confidence threshold "
               f"({MIN_CONFIDENCE}%):\n")
