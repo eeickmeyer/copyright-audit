@@ -193,7 +193,7 @@ if [[ "$SCANNER" == "scancode" ]]; then
     if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1 \
        && [[ -n "$COPYRIGHT_FILE" ]]; then
         echo "Running decopy as sanity check..." >&2
-        decopy --mode full --copyright-file "$COPYRIGHT_FILE" . \
+        decopy --mode full --progress --copyright-file "$COPYRIGHT_FILE" . \
             > "$_WORKDIR/decopy.txt" || true
     fi
 else
@@ -209,7 +209,7 @@ else
     # Also run decopy if available and in check/review mode
     if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1; then
         echo "Running decopy..." >&2
-        decopy --mode full --copyright-file "$COPYRIGHT_FILE" . \
+        decopy --mode full --progress --copyright-file "$COPYRIGHT_FILE" . \
             > "$_WORKDIR/decopy.txt" || true
     fi
 fi
@@ -228,7 +228,7 @@ if [[ "$MODE" == "generate" ]] && command -v decopy >/dev/null 2>&1; then
         mkdir -p "$(dirname "$OUTPUT")" 2>/dev/null || true
     fi
     echo "Generating initial copyright with decopy..." >&2
-    if decopy . > "$_GEN_TARGET" && [[ -s "$_GEN_TARGET" ]]; then
+    if decopy --progress . > "$_GEN_TARGET" && [[ -s "$_GEN_TARGET" ]]; then
         echo "Hardening with scanner cross-validation and DEP-5 fixes..." >&2
         COPYRIGHT_FILE="$_GEN_TARGET"
         MODE="check"
