@@ -36,7 +36,6 @@ parts:
     source: .
     python-packages:
       - scancode-toolkit
-      - decopy
     build-packages:
       - python3-dev
       - gcc
@@ -44,3 +43,4 @@ parts:
     plugin: nil
     stage-packages:
       - licensecheck
+      - decopy
