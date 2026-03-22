@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-03-22
+
+### Added
+- `--export FILE` option for review mode: writes a full-detail export of
+  all findings (mismatches, false positives, undeclared licenses,
+  uncovered files, holder mismatches, etc.) with no truncation
+- Review mode Test 3 now shows inline mismatch details (detected vs.
+  declared license, affected files) instead of just a count
+- Decopy `--progress` flag added to all three invocation sites
+  (check/review sanity checks and generate mode) so progress bars
+  are visible during long scans
+- Snap: `base-files` stage-package (in its own part, filtered to
+  `usr/share/common-licenses/` only) so common-licenses references
+  resolve correctly under strict confinement
+
+### Fixed
+- False positive when checking `/usr/share/common-licenses/` references
+  under snap strict confinement: the script now falls back to
+  `$SNAP/usr/share/common-licenses/` when the host path is inaccessible
+- License file copyright noise: files named LICENSE, COPYING, etc. are
+  now excluded from copyright holder detection, eliminating false
+  positives like FSF's copyright on the GPL text being reported as a
+  project holder
+- Copyright holder "mismatches" reclassified: declared-but-not-detected
+  holders (common for icon themes and data-only projects) are now
+  `[INFO]` instead of `[WARN]`, with the note "normal for files
+  without embedded headers"; undeclared holders remain `[WARN]`
+
 ## 2026-03-21
 
 ### Added

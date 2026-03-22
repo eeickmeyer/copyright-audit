@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (4 623 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (4 761 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -12,12 +12,12 @@ interactive fixing.
 | Lines | Section | Purpose |
 |-------|---------|---------|
 | 1–50 | Header / help text | GPL-3 license header, usage documentation |
-| 52–95 | Argument parsing | `while` loop over `$@`; sets `MODE`, `EXCLUDE_PATTERNS`, `OUTPUT`, `VERBOSE`, `FIX_MODE`, `YES_MODE`, `NO_FETCH`, `JOBS`, `SRCDIR` |
+| 52–95 | Argument parsing | `while` loop over `$@`; sets `MODE`, `EXCLUDE_PATTERNS`, `OUTPUT`, `EXPORT`, `VERBOSE`, `FIX_MODE`, `YES_MODE`, `NO_FETCH`, `JOBS`, `SRCDIR` |
 | 97–109 | Source-dir resolution | Resolves `SRCDIR` to absolute path; validates `debian/copyright` exists (check/review modes) |
 | 111–128 | Scanner detection | Prefers `scancode` → `licensecheck`; requires `python3` |
 | 130–156 | Temp dir & exclusions | Creates `$_WORKDIR`; builds default exclude list (VCS, build artifacts, copyright file itself) |
-| 158–213 | Run scanner | Invokes scancode (JSON output) or licensecheck (deb-machine text); optionally runs cross-validation scans (licensecheck as sanity check, decopy) |
-| 215–237 | Decopy-accelerated generation | If `generate` mode and `decopy` is installed, runs `decopy .` to seed the initial copyright file (progress bar visible on stderr), then switches to `check` + `fix` + `yes` mode so the full hardening pipeline runs automatically |
+| 158–213 | Run scanner | Invokes scancode (JSON output) or licensecheck (deb-machine text); optionally runs cross-validation scans (licensecheck as sanity check, decopy with `--progress`) |
+| 215–237 | Decopy-accelerated generation | If `generate` mode and `decopy` is installed, runs `decopy --progress .` to seed the initial copyright file (progress bar visible on stderr), then switches to `check` + `fix` + `yes` mode so the full hardening pipeline runs automatically |
 | 239–268 | Pass state to Python | Detects packager identity, exports everything as env vars; launches `python3 -` heredoc |
 
 ---
@@ -28,7 +28,7 @@ interactive fixing.
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 269–290 | Env-var intake | Reads all exported variables into Python globals (incl. `_decopy_generated` flag) |
+| 269–290 | Env-var intake | Reads all exported variables into Python globals (incl. `_decopy_generated` flag and `export_file`) |
 | 295–306 | Native-package detection | `_is_native_package()` — reads `debian/source/format` |
 | 307–325 | Built-in license texts | `_BUILTIN_LICENSE_TEXTS` dict (e.g. Unsplash license) |
 | 327–428 | License text fetcher | `fetch_license_text()`, `_fetch_cc_text()`, `_fetch_spdx_text()`, `_fetch_url()`, `format_license_body()` — downloads from SPDX API / Creative Commons |
@@ -81,7 +81,7 @@ These are pure functions called by both check and review modes.
 
 | Lines | Function | Purpose |
 |-------|----------|---------|
-| 1114–1196 | `check_license_completeness()` | `SYSTEM_COMMON_LICENSES` setup (line 1114) then verifies each referenced license has a text block; checks CC full-text, FIXME stubs, common-licenses refs |
+| 1114–1196 | `check_license_completeness()` | `SYSTEM_COMMON_LICENSES` setup (line 1122); tries host `/usr/share/common-licenses/` then `$SNAP/usr/share/common-licenses/` as fallback; verifies each referenced license has a text block; checks CC full-text, FIXME stubs, common-licenses refs |
 | 1198–1234 | `check_coverage()` | Finds files uncovered by any stanza; finds stale globs matching no file |
 | 1236–1328 | `check_license_compatibility()` | Detects known conflicts: Apache+GPL-2, GPL-2-only+GPL-3-only, CDDL+GPL, EPL+GPL, etc. |
 | 1330–1490 | `check_dep5_format()` | Structural DEP-5 validation: Format header, field ordering, tabs, trailing whitespace, blank continuation lines, duplicate globs, catch-all stanza, etc. Returns `(line, severity, message, fix_tag)` tuples |
@@ -109,7 +109,7 @@ avoid splitting names like "Rep Invariant Systems, Inc." on commas.
 
 | Lines | Function | Purpose |
 |-------|----------|---------|
-| 1979–2050 | `check_copyright_holders()` | Compares detected vs. declared holders per stanza; returns missing, extra, and per-file attribution maps |
+| 1979–2050 | `check_copyright_holders()` | Compares detected vs. declared holders per stanza; skips license text files (LICENSE, COPYING) to avoid false positives; returns missing, extra, and per-file attribution maps |
 
 ### Stanza Consolidation (lines 2052–2232)
 
@@ -166,25 +166,25 @@ Structured pass/fail report with 19 tests.
 |------|-------|----------------|
 | 1 | 2884 | DEP-5 format validation |
 | 2 | 2902 | Catch-all `Files: *` stanza |
-| 3 | 2907 | License mismatches |
-| 4 | 2911 | Undeclared licenses |
-| 5 | 2928 | License compatibility (loud `!`-banner on failure) |
-| 6 | 2944 | Non-free licenses in source |
-| 7 | 2954 | Source files without license headers |
-| 8 | 2959 | License text completeness |
-| 9 | 2974 | Stanza coverage (uncovered files) |
-| 10 | 2989 | Stale stanza globs |
-| 11 | 3002 | Copyright holder accuracy |
-| 12 | 3018 | Decopy findings |
-| 13 | 3026 | Low-confidence detections |
-| 14 | 3034 | Stanza consolidation opportunities |
-| 15 | 3050 | FIXME entries in copyright file |
-| 16 | 3070 | Versionless / invalid license identifiers |
-| 17 | 3086 | Broad glob override conflicts |
-| 18 | 3115 | Duplicate file declarations |
-| 19 | 3135 | Scanner cross-validation (scancode vs. licensecheck) |
+| 3 | 2925 | License mismatches (with inline details: detected vs. declared, affected files) |
+| 4 | 2936 | Undeclared licenses |
+| 5 | 2953 | License compatibility (loud `!`-banner on failure) |
+| 6 | 2969 | Non-free licenses in source |
+| 7 | 2979 | Source files without license headers |
+| 8 | 2984 | License text completeness |
+| 9 | 2999 | Stanza coverage (uncovered files) |
+| 10 | 3014 | Stale stanza globs |
+| 11 | 3027 | Copyright holder accuracy (undeclared = WARN; declared-not-detected = INFO) |
+| 12 | 3048 | Decopy findings |
+| 13 | 3056 | Low-confidence detections |
+| 14 | 3064 | Stanza consolidation opportunities |
+| 15 | 3080 | FIXME entries in copyright file |
+| 16 | 3100 | Versionless / invalid license identifiers |
+| 17 | 3116 | Broad glob override conflicts |
+| 18 | 3145 | Duplicate file declarations |
+| 19 | 3165 | Scanner cross-validation (scancode vs. licensecheck) |
 
-Ends with verdict (lines 3155–3180).
+Ends with verdict (lines 3185–3210), detailed mismatch appendix (lines 3197–3209), and optional `--export` full-detail findings writer (lines 3210–3316).
 
 ---
 
@@ -245,6 +245,7 @@ Snap Store. Key design decisions:
 |--------|--------|
 | Base | `core24` |
 | Confinement | `strict` — accesses home, removable-media, and network via plugs |
+| Common licenses | `base-files` in a dedicated part, filtered to `usr/share/common-licenses/` only, so `SYSTEM_COMMON_LICENSES` resolves from `$SNAP` |
 | Scanner | `scancode-toolkit` installed in a self-contained venv at `$SNAP/scancode/` |
 | Serial pool patch | `scancode/pool.py` is replaced at build time with a serial executor to avoid `multiprocessing.Pool` semaphore blocks under strict confinement |
 | Runtime deps | `python3`, `git`, `sed`, `coreutils`, `licensecheck`, `decopy`, `libgomp1` |
@@ -265,7 +266,7 @@ Snap Store. Key design decisions:
 | `SPDX_TO_DEP5` | `dict` | Const | 130+ scanner-output → DEP-5 name mappings |
 | `_NONFREE_RAW` | `set` | Const | Non-free/non-DFSG license identifiers |
 | `SOURCE_EXTS` | `set` | Const | Recognized source file extensions |
-| `COMMON_LICENSES` | `set` | Const | Licenses in `/usr/share/common-licenses/` |
+| `SYSTEM_COMMON_LICENSES` | `set` | Global | Licenses in `/usr/share/common-licenses/` (host or `$SNAP` fallback) |
 | `_path_to_result` | `dict` | Global | Fast path→scan_result lookup for enrichment |
 | `_unicode_pref` | `dict` | Fix mode | Preferred Unicode author name variants |
 

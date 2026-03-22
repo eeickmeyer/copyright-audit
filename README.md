@@ -36,7 +36,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 snap install copyright-audit --classic
 ```
 
-The snap bundles ScanCode Toolkit, licensecheck, and decopy.
+The snap bundles ScanCode Toolkit, licensecheck, decopy, and Debian common-licenses.
 
 ### Manual
 
@@ -69,6 +69,7 @@ copyright-audit --fix --yes [source-dir]
 | `-o, --output FILE` | Output file (generate mode) |
 | `-f, --fix` | Enter interactive fix mode |
 | `--yes` | Auto-accept all fixes (no prompts) |
+| `--export FILE` | Export full review findings to file (review mode) |
 | `-v, --verbose` | Include likely false positives |
 | `--no-fetch` | Skip license text downloads |
 | `-j, --jobs N` | Parallel ScanCode workers (default: nproc) |
