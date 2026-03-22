@@ -11,6 +11,18 @@ All notable changes to this project are documented in this file.
 - Per-file copyright holder attribution tracking to prevent false
   attribution when a holder is detected in only a subset of a
   multi-file stanza's files
+- Email deobfuscation: obfuscated emails such as
+  "chris at kohlhoff dot com" and "oliver dot kowalke@gmail.com"
+  are converted to proper addresses; parenthesized emails are
+  normalized to angle brackets
+- Fix 7 (normalize copyright lines): existing stanzas are re-parsed
+  to correct year ordering (e.g., "4Front Technologies 1993-2006" →
+  "1993-2006 4Front Technologies"), deobfuscate emails, and apply
+  bracket normalization
+- Fix 8 (strip inline common-license text): inline license bodies
+  for licenses available under `/usr/share/common-licenses/` are
+  replaced with a short reference, and a standalone `License:` block
+  with the common-licenses path is added if not already present
 
 ### Fixed
 - Duplicate stanzas: Fix 1 no longer proposes new stanzas for files
@@ -25,6 +37,9 @@ All notable changes to this project are documented in this file.
   years but others do not, the yearless authors inherit peer years;
   falls back to git history or file modification time when no years
   are detected at all
+- Corporate suffixes (Inc., Ltd., LLC, GmbH, AG, etc.) no longer
+  cause erroneous author splitting on commas (e.g.,
+  "Rep Invariant Systems, Inc." is kept as a single holder)
 
 ## 2026-03-20
 

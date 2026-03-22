@@ -1553,10 +1553,10 @@ _CORP_SUFFIXES_RE = re.compile(
 def _deobfuscate_email(s):
     """Convert obfuscated emails to real ones and normalise brackets.
 
-    'chris at kohlhoff dot com'  → 'chris@kohlhoff.com'
-    '(user@example.com)'         → '<user@example.com>'
-    '(user at example dot com)'  → '<user@example.com>'
-    '(oliver dot kowalke@gmail.com)' → '<oliver.kowalke@gmail.com>'
+    'alice at example dot com'       → 'alice@example.com'
+    '(user@example.com)'             → '<user@example.com>'
+    '(user at example dot com)'      → '<user@example.com>'
+    '(bob dot smith@example.org)'    → '<bob.smith@example.org>'
     """
     # Deobfuscate "word at word dot word" patterns
     def _deob(m):
@@ -1634,11 +1634,11 @@ def _split_multi_authors(author_str):
     """Split a string containing multiple comma/and-separated authors.
 
     Handles patterns like:
-      "Huw Wilkins, Cory Kontros,and Andrew Wedderburn"
-      "John Smith and Jane Doe"
+      "Alice Brown, Bob Smith, and Carol Jones"
+      "John Doe and Jane Doe"
     But does NOT split location qualifiers like:
-      "Ableton AG, Berlin."  → kept as one holder
-      "Mega Limited, Auckland, New Zealand" → kept as one holder
+      "Example GmbH, Munich."  → kept as one holder
+      "Acme Ltd, Auckland, New Zealand" → kept as one holder
     Returns a list of individual author strings.
     """
     if not author_str:
@@ -1646,7 +1646,7 @@ def _split_multi_authors(author_str):
 
     # When the string contains explicit "and"/"&", it is very likely
     # a multi-author list, so use a stricter location threshold (1 word)
-    # to avoid merging real person names like "Steve Harris".
+    # to avoid merging real person names like "Bob Smith".
     has_explicit_sep = bool(re.search(r'\band\b|&', author_str,
                                       flags=re.IGNORECASE))
     loc_max_words = 1 if has_explicit_sep else 2

@@ -13,7 +13,9 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **Non-free / DFSG detection**: SSPL, BUSL, CC-NC, CC-ND, and more
 - **Coverage analysis**: uncovered files and stale globs
 - **Compatibility checks**: Apache + GPL-2-only, EPL + GPL, CDDL + GPL, etc.
-- **Interactive fix mode**: proposes stanzas, removes stale globs, corrects formatting, adds missing holders and license text
+- **Interactive fix mode**: proposes stanzas, removes stale globs, corrects formatting, adds missing holders and license text; normalizes year ordering and email addresses in existing stanzas; replaces inline license bodies for common licenses with `/usr/share/common-licenses/` references
+- **Email deobfuscation**: converts "alice at example dot com" and similar patterns to proper addresses; normalizes parenthesized emails to angle brackets
+- **Corporate suffix awareness**: names ending in Inc., Ltd., LLC, GmbH, and similar suffixes are never split on commas
 - **130+ SPDX-to-DEP-5 mappings**: GFDL, Creative Commons 1.0–4.0, AGPL, EPL, CDDL, OSL families
 
 ## Requirements
