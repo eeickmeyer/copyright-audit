@@ -2689,9 +2689,13 @@ if mode == "generate":
 
     compat_issues = check_license_compatibility(all_lics)
     if compat_issues:
-        print(f"\n  WARNING: {len(compat_issues)} license compatibility issue(s):", file=sys.stderr)
+        bar = "!" * 60
+        print(f"\n{bar}", file=sys.stderr)
+        print(f"  LICENSE INCOMPATIBILITY — {len(compat_issues)} conflict(s) detected", file=sys.stderr)
+        print(bar, file=sys.stderr)
         for issue in compat_issues:
             print(f"    - {issue}", file=sys.stderr)
+        print(f"{bar}\n", file=sys.stderr)
 
     # Summary to stderr
     print(f"\n  Files scanned:  {len(scan_results)}", file=sys.stderr)
@@ -2902,9 +2906,13 @@ if mode == "review":
     # Merge, dedup
     all_compat = list(dict.fromkeys(compat_issues + detected_compat))
     if all_compat:
-        print(f"[FAIL] License compatibility: {len(all_compat)} conflict(s)")
+        bar = "!" * W
+        print(bar)
+        print(f"[FAIL] LICENSE INCOMPATIBILITY — {len(all_compat)} conflict(s)")
+        print(bar)
         for issue in all_compat:
             print(f"        {issue}")
+        print(bar)
     else:
         print("[PASS] No license compatibility issues")
 
@@ -3255,8 +3263,13 @@ else:
     all_compat = list(dict.fromkeys(compat_issues + detected_compat))
 
     if all_compat:
+        bar = "!" * W
+        print(f"\n{bar}")
+        print(f"  LICENSE INCOMPATIBILITY — {len(all_compat)} conflict(s) detected")
+        print(bar)
         for issue in all_compat:
             print(f"\n  {issue}")
+        print(f"\n{bar}")
         print()
 
         # Show Apache details if relevant
