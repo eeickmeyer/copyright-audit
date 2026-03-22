@@ -115,6 +115,13 @@ parts:
       ''').lstrip())
       "
 
+  common-licenses:
+    plugin: nil
+    stage-packages:
+      - base-files
+    stage:
+      - usr/share/common-licenses/
+
   runtime-deps:
     plugin: nil
     stage-packages:
