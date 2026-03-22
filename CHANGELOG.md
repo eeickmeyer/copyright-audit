@@ -10,8 +10,9 @@ All notable changes to this project are documented in this file.
   automatically switches to check+fix+yes to harden it with scanner
   cross-validation, DEP-5 normalization, and license text fetching.
   Falls back to the built-in generator when decopy is absent.
-- Snap packaging: `snap/snapcraft.yaml` with core24 base, classic
-  confinement, bundling scancode-toolkit, licensecheck, and decopy
+- Snap packaging: `snap/snapcraft.yaml` with core24 base, strict
+  confinement, bundling scancode-toolkit (with serial pool patch for
+  snap compatibility), licensecheck, decopy, git, and coreutils
 - Loud license incompatibility banners in all three modes (generate,
   review, check) using `!`-character box warnings so conflicts are
   impossible to miss
@@ -70,6 +71,8 @@ All notable changes to this project are documented in this file.
 - Corporate suffixes (Inc., Ltd., LLC, GmbH, AG, etc.) no longer
   cause erroneous author splitting on commas (e.g.,
   "Rep Invariant Systems, Inc." is kept as a single holder)
+- Decopy progress bar now visible during generate mode (removed
+  `--quiet` flag and stderr suppression)
 
 ## 2026-03-20
 
