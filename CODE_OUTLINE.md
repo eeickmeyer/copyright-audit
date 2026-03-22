@@ -16,7 +16,7 @@ interactive fixing.
 | 97–109 | Source-dir resolution | Resolves `SRCDIR` to absolute path; validates `debian/copyright` exists (check/review modes) |
 | 111–128 | Scanner detection | Prefers `scancode` → `licensecheck`; requires `python3` |
 | 130–156 | Temp dir & exclusions | Creates `$_WORKDIR`; builds default exclude list (VCS, build artifacts, copyright file itself) |
-| 158–213 | Run scanner | Invokes scancode (JSON output) or licensecheck (deb-machine text); optionally runs cross-validation scans (licensecheck as sanity check, decopy with `--progress`) |
+| 158–213 | Run scanner | Invokes scancode (JSON output) or licensecheck (deb-machine text); optionally runs cross-validation scans (secondary scanner with `--progress`): licensecheck when scancode is primary, decopy when licensecheck is primary |
 | 215–237 | Decopy-accelerated generation | If `generate` mode and `decopy` is installed, runs `decopy --progress .` to seed the initial copyright file (progress bar visible on stderr), then switches to `check` + `fix` + `yes` mode so the full hardening pipeline runs automatically |
 | 239–268 | Pass state to Python | Detects packager identity, exports everything as env vars; launches `python3 -` heredoc |
 
@@ -152,8 +152,8 @@ is the fallback when decopy is absent.
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 2743–2795 | Load auxiliary results | Parses decopy output and licensecheck sanity-check results |
-| 2797–2835 | `run_sanity_check()` | Cross-validates scancode vs. licensecheck by license family |
+| 2743–2795 | Load auxiliary results | `_parse_dep5_sanity()` parses DEP-5 output from each available secondary scanner into `all_sanity_results` dict |
+| 2797–2835 | `run_sanity_check()` | Cross-validates primary vs. one secondary scanner by license family; called once per secondary tool, results stored in `all_sanity_discrepancies` |
 | 2837–2872 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
 
 ---
@@ -182,7 +182,7 @@ Structured pass/fail report with 19 tests.
 | 16 | 3100 | Versionless / invalid license identifiers |
 | 17 | 3116 | Broad glob override conflicts |
 | 18 | 3145 | Duplicate file declarations |
-| 19 | 3165 | Scanner cross-validation (scancode vs. licensecheck) |
+| 19 | 3165 | Scanner cross-validation (primary vs. secondary) |
 
 Ends with verdict (lines 3185–3210), detailed mismatch appendix (lines 3197–3209), and optional `--export` full-detail findings writer (lines 3210–3316).
 
@@ -206,7 +206,7 @@ to stderr (line 3186) so the check report doesn't pollute the copyright output.
 | 8 | 3421 | Copyright holder accuracy |
 | 9 | 3451 | Stanza consolidation |
 | 10 | 3475 | Decopy findings |
-| 11 | 3487 | Scanner cross-validation |
+| 11 | 3487 | Scanner cross-validation (primary vs. secondary) |
 | 12 | 3506 | Low-confidence detections |
 | Summary | 3518 | Aggregate counts, result verdict |
 

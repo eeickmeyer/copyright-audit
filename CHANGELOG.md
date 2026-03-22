@@ -13,6 +13,13 @@ All notable changes to this project are documented in this file.
 - Decopy `--progress` flag added to all three invocation sites
   (check/review sanity checks and generate mode) so progress bars
   are visible during long scans
+- Cross-validation generalized: when licensecheck is the primary
+  scanner and decopy is available, decopy is now used as the sanity-
+  check scanner (previously cross-validation only worked with
+  scancode as primary). When all three scanners are available,
+  the primary cross-validates against each secondary independently
+  (e.g. scancode vs licensecheck AND scancode vs decopy). All
+  reporting labels dynamically reflect the actual scanner pairs
 - Snap: `base-files` stage-package (in its own part, filtered to
   `usr/share/common-licenses/` only) so common-licenses references
   resolve correctly under strict confinement
