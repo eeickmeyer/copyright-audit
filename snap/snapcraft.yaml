@@ -1,0 +1,46 @@
+name: copyright-audit
+base: core24
+version: '1.0'
+summary: Debian copyright file generator, validator, and reviewer
+description: |
+  A Debian debian/copyright file generator, validator, and reviewer.
+  Scans source trees using ScanCode Toolkit or licensecheck.
+
+  Three modes:
+    - check (default): validate existing debian/copyright
+    - generate: scan source tree and produce a new debian/copyright
+    - review: structured pass/fail report for archive review
+
+  Features include DEP-5 validation, license mismatch detection,
+  copyright holder auditing with fuzzy matching, automatic license
+  fetching from SPDX and Creative Commons APIs, interactive fix mode,
+  and 130+ SPDX-to-DEP-5 license mappings.
+license: GPL-3.0+
+grade: stable
+confinement: classic
+
+apps:
+  copyright-audit:
+    command: bin/copyright-audit
+
+parts:
+  copyright-audit:
+    plugin: dump
+    source: .
+    organize:
+      copyright-audit: bin/copyright-audit
+    stage:
+      - bin/copyright-audit
+  scancode-toolkit:
+    plugin: python
+    source: .
+    python-packages:
+      - scancode-toolkit
+      - decopy
+    build-packages:
+      - python3-dev
+      - gcc
+  licensecheck:
+    plugin: nil
+    stage-packages:
+      - licensecheck
