@@ -941,6 +941,159 @@ for _r in scan_results:
         _r["copyrights"].append(_svg_creator)
         _enriched_count += 1
 
+# ── XMP metadata enrichment for raster images ────────────────────────
+# JPEG, PNG, TIFF, WebP and other image formats commonly embed XMP
+# (Extensible Metadata Platform) packets — the same RDF/XML used in
+# SVGs — containing dc:creator, cc:license, dc:rights, and date info.
+# This extracts that XML via byte-string search (no external library
+# needed) and reuses _cc_url_to_dep5() for license normalisation.
+_XMP_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff",
+    ".webp", ".gif", ".bmp", ".ico",
+})
+_XMP_RIGHTS_NS = "http://ns.adobe.com/xap/1.0/rights/"
+_XMP_NS = "http://ns.adobe.com/xap/1.0/"
+_PHOTOSHOP_NS = "http://ns.adobe.com/photoshop/1.0/"
+
+def _extract_xmp_xml(filepath, max_read=2 * 1024 * 1024):
+    """Extract the XMP XML packet from a binary file.
+    Returns the XML as a string, or None if no XMP is found.
+    Reads at most *max_read* bytes to avoid loading huge files."""
+    try:
+        with open(filepath, "rb") as fh:
+            data = fh.read(max_read)
+    except OSError:
+        return None
+    # Look for xpacket or xmpmeta start markers
+    start = data.find(b"<x:xmpmeta")
+    if start < 0:
+        start = data.find(b"<?xpacket")
+    if start < 0:
+        return None
+    # Find matching end
+    end = data.find(b"</x:xmpmeta>", start)
+    if end >= 0:
+        end += len(b"</x:xmpmeta>")
+    else:
+        end = data.find(b"<?xpacket end", start)
+        if end >= 0:
+            end = data.find(b"?>", end)
+            if end >= 0:
+                end += 2
+    if end < 0:
+        return None
+    try:
+        return data[start:end].decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+for _r in scan_results:
+    _fp = _r["path"].lstrip("./")
+    _ext = os.path.splitext(_fp)[1].lower()
+    if _ext not in _XMP_IMAGE_EXTS:
+        continue
+    _xmp_xml = _extract_xmp_xml(_fp)
+    if not _xmp_xml:
+        continue
+    try:
+        _xmp_root = ET.fromstring(_xmp_xml)
+    except ET.ParseError:
+        continue
+
+    _xmp_lic = None
+    _xmp_creator = None
+    _xmp_rights = None
+    _xmp_year = None
+
+    _CC_NS = "http://creativecommons.org/ns#"
+    _DC_NS = "http://purl.org/dc/elements/1.1/"
+    _RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+
+    for _el in _xmp_root.iter():
+        _tag = _el.tag
+
+        # cc:license — rdf:resource attribute holds the URL
+        if _tag == f"{{{_CC_NS}}}license" and not _xmp_lic:
+            _lic_url = _el.get(f"{{{_RDF_NS}}}resource", "")
+            if _lic_url:
+                _xmp_lic = _cc_url_to_dep5(_lic_url)
+        elif _tag == f"{{{_CC_NS}}}License" and not _xmp_lic:
+            _lic_url = _el.get(f"{{{_RDF_NS}}}about", "")
+            if _lic_url:
+                _xmp_lic = _cc_url_to_dep5(_lic_url)
+
+        # xmpRights:WebStatement — fallback license URL
+        elif _tag == f"{{{_XMP_RIGHTS_NS}}}WebStatement" and not _xmp_lic:
+            _ws = (_el.text or "").strip()
+            if _ws:
+                _xmp_lic = _cc_url_to_dep5(_ws)
+
+        # dc:creator > rdf:Seq > rdf:li  or  dc:creator (flat text)
+        elif _tag == f"{{{_DC_NS}}}creator" and not _xmp_creator:
+            _seq = _el.find(f"{{{_RDF_NS}}}Seq")
+            if _seq is not None:
+                _li = _seq.find(f"{{{_RDF_NS}}}li")
+                if _li is not None and _li.text and _li.text.strip():
+                    _xmp_creator = _li.text.strip()
+            elif _el.text and _el.text.strip():
+                _xmp_creator = _el.text.strip()
+
+        # photoshop:Credit — alternative author source
+        elif _tag == f"{{{_PHOTOSHOP_NS}}}Credit" and not _xmp_creator:
+            _cr = (_el.text or "").strip()
+            if _cr:
+                _xmp_creator = _cr
+
+        # dc:rights > rdf:Alt > rdf:li — copyright string
+        elif _tag == f"{{{_DC_NS}}}rights" and not _xmp_rights:
+            _alt = _el.find(f"{{{_RDF_NS}}}Alt")
+            if _alt is not None:
+                _li = _alt.find(f"{{{_RDF_NS}}}li")
+                if _li is not None and _li.text and _li.text.strip():
+                    _xmp_rights = _li.text.strip()
+
+        # xmp:CreateDate — extract year
+        elif _tag == f"{{{_XMP_NS}}}CreateDate" and not _xmp_year:
+            _dt = (_el.text or "").strip()
+            _ym = re.match(r'(\d{4})', _dt)
+            if _ym:
+                _xmp_year = _ym.group(1)
+
+    if not _xmp_lic and not _xmp_creator and not _xmp_rights:
+        continue
+
+    # License: override scanner's detection when XMP is present
+    if _xmp_lic:
+        _old_lics = _r["licenses"]
+        _new_lic = to_dep5(_xmp_lic)
+        if _old_lics != [_new_lic]:
+            _r["licenses"] = [_new_lic]
+            if _old_lics:
+                print(f"  XMP metadata override: {_fp}: "
+                      f"{', '.join(_old_lics)} → {_new_lic}",
+                      file=sys.stderr)
+            _enriched_count += 1
+
+    # Copyright holder: prefer dc:creator, fall back to dc:rights text
+    _holder = _xmp_creator
+    if not _holder and _xmp_rights:
+        # Parse "Copyright 2024 Some Author" to extract the author part
+        _stripped = re.sub(
+            r'^(?:copyright|\(c\)|©)\s*\d[\d,\s-]*', '',
+            _xmp_rights, flags=re.IGNORECASE,
+        ).strip()
+        if _stripped:
+            _holder = _stripped
+    if _holder:
+        # Prepend year if we have one and it's not already in copyrights
+        if _xmp_year and not any(_xmp_year in c for c in _r["copyrights"]):
+            _holder_with_year = f"{_xmp_year} {_holder}"
+        else:
+            _holder_with_year = _holder
+        if _holder_with_year not in _r["copyrights"] and _holder not in _r["copyrights"]:
+            _r["copyrights"].append(_holder_with_year)
+            _enriched_count += 1
+
 # ── GNOME background-properties XML enrichment ───────────────────────
 for _xml_path in globmod.glob("usr/share/gnome-background-properties/*.xml"):
     try:

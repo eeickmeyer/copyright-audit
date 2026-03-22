@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (4 761 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (4 952 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -51,22 +51,23 @@ interactive fixing.
 | 695–738 | licensecheck parser | Parses `--deb-machine` paragraph output |
 | 743–756 | `progress()` | Stderr progress bar for large scans |
 
-### Metadata Enrichment (lines 758–965)
+### Metadata Enrichment (lines 758–1130)
 
 Overrides scanner heuristics with authoritative embedded metadata.
 
 | Lines | Section | Purpose |
-|-------|---------|---------|
+|-------|---------|----------|
 | 763–766 | Path-to-result index | `_path_to_result` dict for O(1) enrichment lookups |
 | 769–834 | KDE `metadata.json` | Extracts `KPlugin.Authors`, detects Unsplash URLs, applies to image files via symlink resolution |
-| 836–924 | SVG RDF/XML metadata | Parses `<cc:license>` and `<dc:creator>` from SVG `<metadata>` — overrides scancode's CC version guesses |
-| 926–965 | GNOME background XML | Parses `<wallpaper>` elements in `gnome-background-properties/*.xml`, extracts "by Artist" pattern |
+| 836–942 | SVG RDF/XML metadata | Parses `<cc:license>` and `<dc:creator>` from SVG `<metadata>` — overrides scancode's CC version guesses |
+| 944–1095 | XMP metadata for raster images | Extracts XMP packets from PNG/JPEG/TIFF/WebP/etc. via byte-string search; parses `dc:creator`, `cc:license`, `dc:rights`, `xmpRights:WebStatement`, `photoshop:Credit`, `xmp:CreateDate` — overrides scanner heuristics |
+| 1097–1130 | GNOME background XML | Parses `<wallpaper>` elements in `gnome-background-properties/*.xml`, extracts "by Artist" pattern |
 
-### Directory License Inheritance (lines 969–1050)
+### Directory License Inheritance (lines 1140–1220)
 
 | Lines | Section | Purpose |
-|-------|---------|---------|
-| 969–1050 | Inheritance logic | Files with no detected license inherit from directory's dominant license — only when a COPYING/LICENSE file exists nearby; skipped for native packages |
+|-------|---------|----------|
+| 1140–1220 | Inheritance logic | Files with no detected license inherit from directory's dominant license — only when a COPYING/LICENSE file exists nearby; skipped for native packages |
 
 ### Existing `debian/copyright` Parsing (lines 1052–1118)
 

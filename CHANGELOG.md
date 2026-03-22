@@ -20,6 +20,13 @@ All notable changes to this project are documented in this file.
   the primary cross-validates against each secondary independently
   (e.g. scancode vs licensecheck AND scancode vs decopy). All
   reporting labels dynamically reflect the actual scanner pairs
+- XMP metadata enrichment for raster images: extracts `dc:creator`,
+  `cc:license`, `dc:rights`, `xmpRights:WebStatement`,
+  `photoshop:Credit`, and `xmp:CreateDate` from embedded XMP packets
+  in PNG, JPEG, TIFF, WebP, GIF, BMP, and ICO files — no external
+  dependencies (byte-string search + stdlib `xml.etree`). License
+  and copyright holder extracted from XMP override scanner heuristics,
+  matching the existing SVG RDF/XML behaviour
 - Snap: `base-files` stage-package (in its own part, filtered to
   `usr/share/common-licenses/` only) so common-licenses references
   resolve correctly under strict confinement
