@@ -223,7 +223,7 @@ if [[ "$MODE" == "generate" ]] && command -v decopy >/dev/null 2>&1; then
         mkdir -p "$(dirname "$OUTPUT")" 2>/dev/null || true
     fi
     echo "Generating initial copyright with decopy..." >&2
-    if decopy --quiet . > "$_GEN_TARGET" 2>/dev/null && [[ -s "$_GEN_TARGET" ]]; then
+    if decopy . > "$_GEN_TARGET" && [[ -s "$_GEN_TARGET" ]]; then
         echo "Hardening with scanner cross-validation and DEP-5 fixes..." >&2
         COPYRIGHT_FILE="$_GEN_TARGET"
         MODE="check"
