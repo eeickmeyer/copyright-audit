@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 ## 2026-03-21
 
 ### Added
+- Snap packaging: `snap/snapcraft.yaml` with core24 base, classic
+  confinement, bundling scancode-toolkit, licensecheck, and decopy
+- Loud license incompatibility banners in all three modes (generate,
+  review, check) using `!`-character box warnings so conflicts are
+  impossible to miss
 - Scanner cross-validation: when ScanCode is the primary scanner,
   licensecheck and decopy are run as sanity checks and discrepancies
   are reported in both review (Test 19) and check (Section 12) modes
@@ -32,6 +37,19 @@ All notable changes to this project are documented in this file.
   `PLACEHOLDER` token
 
 ### Fixed
+- Scanner exit code capture: `set -e` no longer aborts before
+  recording ScanCode's exit status
+- Crash when no files have detected licenses in generate mode
+  (`max()` on empty sequence)
+- Unhelpful traceback on corrupt ScanCode JSON; now prints an
+  actionable error message
+- `git log` argument length overflow for large repos; copyright year
+  inference now batches in chunks of 200 files
+- Usage comment corrected from `copyright-check.sh` to
+  `copyright-audit`
+- Check mode section numbering gap (10 → 12, skipping 11) fixed to
+  consecutive 10, 11, 12
+- Redundant duplicate condition in public-domain URL check simplified
 - Duplicate stanzas: Fix 1 no longer proposes new stanzas for files
   already covered by a specific (non-catch-all) stanza
 - Placeholder copyright holders (`Unknown`, `FIXME`, `TODO`, `none`,
