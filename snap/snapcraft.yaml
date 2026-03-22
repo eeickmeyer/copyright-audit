@@ -132,4 +132,5 @@ parts:
       - coreutils
       - licensecheck
       - decopy
+      - python3-tqdm
       - libgomp1

@@ -3170,10 +3170,11 @@ if mode == "review":
     if real_mismatches:
         for (det, decl), files in sorted(real_mismatches.items()):
             print(f"        Detected '{det}' but declared '{decl}' ({len(files)} file(s))")
-            for fp in files[:3]:
+            _lim = len(files) if verbose else 3
+            for fp in files[:_lim]:
                 print(f"          {fp}")
-            if len(files) > 3:
-                print(f"          ... and {len(files) - 3} more")
+            if len(files) > _lim:
+                print(f"          ... and {len(files) - _lim} more")
 
     # Test 4: Missing licenses
     declared_lics = set(lic for _, lic in stanzas)
@@ -3247,19 +3248,21 @@ if mode == "review":
         "INFO" if len(src_uncovered) < 5 else "WARN")
     print(f"[{status}] Source files not matched by any stanza: {len(src_uncovered)}")
     if src_uncovered:
-        for fp, lics in src_uncovered[:5]:
+        _lim = len(src_uncovered) if verbose else 5
+        for fp, lics in src_uncovered[:_lim]:
             lic_str = ", ".join(lics) if lics else "(unknown)"
             print(f"        {fp}  [{lic_str}]")
-        if len(src_uncovered) > 5:
-            print(f"        ... and {len(src_uncovered) - 5} more")
+        if len(src_uncovered) > _lim:
+            print(f"        ... and {len(src_uncovered) - _lim} more")
 
     # Test 10: Stale stanza globs
     status = "PASS" if not stale else "WARN"
     print(f"[{status}] Stale stanza globs (match no file): {len(stale)}")
-    for glob_pat, lic in stale[:5]:
+    _lim = len(stale) if verbose else 5
+    for glob_pat, lic in stale[:_lim]:
         print(f"        {glob_pat}  ({lic})")
-    if len(stale) > 5:
-        print(f"        ... and {len(stale) - 5} more")
+    if len(stale) > _lim:
+        print(f"        ... and {len(stale) - _lim} more")
 
     print()
     lic_ok = not lic_issues or not errors
@@ -3275,33 +3278,37 @@ if mode == "review":
             status = "WARN"
             print(f"[{status}] Undeclared copyright holders: "
                   f"{len(missing_holders)} detected in source but not in debian/copyright")
-            for glob_pat, holder in missing_holders[:3]:
+            _lim = len(missing_holders) if verbose else 3
+            for glob_pat, holder in missing_holders[:_lim]:
                 print(f"        + {glob_pat}: {holder}")
-            if len(missing_holders) > 3:
-                print(f"        ... and {len(missing_holders) - 3} more")
+            if len(missing_holders) > _lim:
+                print(f"        ... and {len(missing_holders) - _lim} more")
         if extra_holders:
             print(f"[INFO] Declared holders not found in file headers: "
                   f"{len(extra_holders)} (normal for files without embedded headers)")
-            for glob_pat, holder in extra_holders[:3]:
+            _lim = len(extra_holders) if verbose else 3
+            for glob_pat, holder in extra_holders[:_lim]:
                 print(f"        {glob_pat}: {holder}")
-            if len(extra_holders) > 3:
-                print(f"        ... and {len(extra_holders) - 3} more")
+            if len(extra_holders) > _lim:
+                print(f"        ... and {len(extra_holders) - _lim} more")
 
     # Test 12: Decopy findings
     if decopy_issues:
         print(f"[INFO] Decopy findings: {len(decopy_issues)} issue(s)")
-        for line in decopy_issues[:5]:
+        _lim = len(decopy_issues) if verbose else 5
+        for line in decopy_issues[:_lim]:
             print(f"        {line}")
-        if len(decopy_issues) > 5:
-            print(f"        ... and {len(decopy_issues) - 5} more")
+        if len(decopy_issues) > _lim:
+            print(f"        ... and {len(decopy_issues) - _lim} more")
     
     # Test 13: Low-confidence detections
     if low_confidence:
         print(f"[INFO] Low-confidence license detections skipped: {len(low_confidence)}")
-        for path, lic, score in low_confidence[:5]:
+        _lim = len(low_confidence) if verbose else 5
+        for path, lic, score in low_confidence[:_lim]:
             print(f"        {path}  ({lic}, score={score})")
-        if len(low_confidence) > 5:
-            print(f"        ... and {len(low_confidence) - 5} more")
+        if len(low_confidence) > _lim:
+            print(f"        ... and {len(low_confidence) - _lim} more")
 
     # Test 14: Stanza consolidation opportunities
     consol_groups = check_consolidation()
@@ -3309,13 +3316,14 @@ if mode == "review":
         total_saving = sum(len(g["stanzas"]) - 1 for g in consol_groups)
         print(f"[INFO] Stanza consolidation: {len(consol_groups)} group(s), "
               f"{total_saving} stanza(s) can be merged")
-        for grp in consol_groups[:5]:
+        _lim = len(consol_groups) if verbose else 5
+        for grp in consol_groups[:_lim]:
             n = len(grp["stanzas"])
             f_count = len(grp["merged_files"])
             print(f"        {grp['license']}: {n} stanzas → 1 "
                   f"({f_count} files, {', '.join(grp['merged_cops'][:2])})")
-        if len(consol_groups) > 5:
-            print(f"        ... and {len(consol_groups) - 5} more")
+        if len(consol_groups) > _lim:
+            print(f"        ... and {len(consol_groups) - _lim} more")
     else:
         print("[PASS] No stanza consolidation opportunities")
 
@@ -3332,10 +3340,11 @@ if mode == "review":
             fixme_stanzas.append(first_file)
     if fixme_stanzas:
         print(f"[WARN] FIXME entries needing attention: {len(fixme_stanzas)}")
-        for fs in fixme_stanzas[:5]:
+        _lim = len(fixme_stanzas) if verbose else 5
+        for fs in fixme_stanzas[:_lim]:
             print(f"        Files: {fs} ...")
-        if len(fixme_stanzas) > 5:
-            print(f"        ... and {len(fixme_stanzas) - 5} more")
+        if len(fixme_stanzas) > _lim:
+            print(f"        ... and {len(fixme_stanzas) - _lim} more")
     else:
         print("[PASS] No FIXME entries in copyright file")
 
@@ -3377,10 +3386,11 @@ if mode == "review":
     if override_issues:
         print(f"[WARN] Broad globs overriding specific stanzas: "
               f"{len(override_issues)}")
-        for glob_pat, lic, n in override_issues[:5]:
+        _lim = len(override_issues) if verbose else 5
+        for glob_pat, lic, n in override_issues[:_lim]:
             print(f"        {glob_pat} ({lic}) overrides {n} specific stanza(s)")
-        if len(override_issues) > 5:
-            print(f"        ... and {len(override_issues) - 5} more")
+        if len(override_issues) > _lim:
+            print(f"        ... and {len(override_issues) - _lim} more")
     else:
         print("[PASS] No broad-glob override conflicts")
 
@@ -3396,11 +3406,12 @@ if mode == "review":
                  if len(occs) > 1}
     if dup_files:
         print(f"[WARN] Files declared in multiple stanzas: {len(dup_files)}")
-        for fp in sorted(dup_files)[:5]:
+        _lim = len(dup_files) if verbose else 5
+        for fp in sorted(dup_files)[:_lim]:
             lics = [lic for _, lic in dup_files[fp]]
             print(f"        {fp}  ({' → '.join(lics)})")
-        if len(dup_files) > 5:
-            print(f"        ... and {len(dup_files) - 5} more")
+        if len(dup_files) > _lim:
+            print(f"        ... and {len(dup_files) - _lim} more")
     else:
         print("[PASS] No duplicate file declarations")
 
@@ -3410,24 +3421,26 @@ if mode == "review":
             # Files where all scanners disagree
             print(f"[WARN] Scanner cross-validation: "
                   f"{len(sanity_real_disc)} file(s) where all scanners disagree")
-            for fp, tool_lics in sanity_real_disc[:5]:
+            _lim = len(sanity_real_disc) if verbose else 5
+            for fp, tool_lics in sanity_real_disc[:_lim]:
                 print(f"        {fp}")
                 for _t, _l in sorted(tool_lics.items()):
                     _ls = ", ".join(sorted(_l)) or "(none)"
                     print(f"          {_t}:{' ' * max(1, 14 - len(_t))}{_ls}")
-            if len(sanity_real_disc) > 5:
-                print(f"        ... and {len(sanity_real_disc) - 5} more")
+            if len(sanity_real_disc) > _lim:
+                print(f"        ... and {len(sanity_real_disc) - _lim} more")
         if sanity_consensus:
             # Files where 2-of-3 agree — informational only
             print(f"[INFO] Scanner cross-validation: "
                   f"{len(sanity_consensus)} file(s) resolved by 2-of-3 consensus")
-            for fp, tool_lics, consensus in sanity_consensus[:3]:
+            _lim = len(sanity_consensus) if verbose else 3
+            for fp, tool_lics, consensus in sanity_consensus[:_lim]:
                 print(f"        {fp}  →  {consensus}")
                 for _t, _l in sorted(tool_lics.items()):
                     _ls = ", ".join(sorted(_l)) or "(none)"
                     print(f"          {_t}:{' ' * max(1, 14 - len(_t))}{_ls}")
-            if len(sanity_consensus) > 3:
-                print(f"        ... and {len(sanity_consensus) - 3} more")
+            if len(sanity_consensus) > _lim:
+                print(f"        ... and {len(sanity_consensus) - _lim} more")
         if not sanity_real_disc and not sanity_consensus:
             _tool_names = " and ".join(sanity_tools)
             print(f"[PASS] Scanner cross-validation: "
@@ -3458,10 +3471,11 @@ if mode == "review":
         for (det, decl), files in sorted(real_mismatches.items()):
             print(f"\n  Detected: {det}")
             print(f"  Declared: {decl}")
-            for fp in files[:5]:
+            _lim = len(files) if verbose else 5
+            for fp in files[:_lim]:
                 print(f"    -> {fp}")
-            if len(files) > 5:
-                print(f"    ... and {len(files) - 5} more")
+            if len(files) > _lim:
+                print(f"    ... and {len(files) - _lim} more")
         print()
 
     # ── Export full-detail findings ───────────────────────────────────
