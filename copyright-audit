@@ -34,6 +34,7 @@
 #   -f, --fix               Interactively fix issues found (check mode only)
 #   --yes                   Auto-accept all fixes (use with --fix, no prompts)
 #   -v, --verbose           Show all mismatches including likely false positives
+#   --export FILE          Export full review findings to FILE (review mode)
 #   --no-fetch              Don't download license text from SPDX/CC (use FIXME stubs)
 #   -j, --jobs N            Parallel scancode workers (default: nproc)
 #   -h, --help              Show this help
@@ -52,6 +53,7 @@ set -euo pipefail
 MODE="check"
 EXCLUDE_PATTERNS=()
 OUTPUT=""
+EXPORT=""
 VERBOSE=false
 FIX_MODE=false
 YES_MODE=false
@@ -78,6 +80,9 @@ while [[ $# -gt 0 ]]; do
             FIX_MODE=true; shift ;;
         --yes)
             YES_MODE=true; shift ;;
+        --export)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
+            EXPORT="$2"; shift 2 ;;
         -v|--verbose)
             VERBOSE=true; shift ;;
         --no-fetch)
@@ -188,8 +193,8 @@ if [[ "$SCANNER" == "scancode" ]]; then
     if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1 \
        && [[ -n "$COPYRIGHT_FILE" ]]; then
         echo "Running decopy as sanity check..." >&2
-        decopy --mode full --copyright-file "$COPYRIGHT_FILE" --quiet . \
-            > "$_WORKDIR/decopy.txt" 2>&1 || true
+        decopy --mode full --copyright-file "$COPYRIGHT_FILE" . \
+            > "$_WORKDIR/decopy.txt" || true
     fi
 else
     echo "Running licensecheck..." >&2
@@ -204,8 +209,8 @@ else
     # Also run decopy if available and in check/review mode
     if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1; then
         echo "Running decopy..." >&2
-        decopy --mode full --copyright-file "$COPYRIGHT_FILE" --quiet . \
-            > "$_WORKDIR/decopy.txt" 2>&1 || true
+        decopy --mode full --copyright-file "$COPYRIGHT_FILE" . \
+            > "$_WORKDIR/decopy.txt" || true
     fi
 fi
 
@@ -263,7 +268,7 @@ HAS_SANITY_CHECK="false"
 if [[ "$SCANNER" == "scancode" && -s "$_WORKDIR/licensecheck_sanity.txt" ]]; then
     HAS_SANITY_CHECK="true"
 fi
-export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FILE OUTPUT
+export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FILE OUTPUT EXPORT
 export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR HAS_SANITY_CHECK DECOPY_GENERATED
 
 python3 - "$SCAN_FILE" << 'PYEOF'
@@ -283,6 +288,7 @@ verbose = os.environ.get("VERBOSE", "false") == "true"
 fix_mode = os.environ.get("FIX_MODE", "false") == "true"
 yes_mode = os.environ.get("YES_MODE", "false") == "true"
 no_fetch = os.environ.get("NO_FETCH", "false") == "true"
+export_file = os.environ.get("EXPORT", "")
 packager_name = os.environ.get("PACKAGER_NAME", "")
 packager_email = os.environ.get("PACKAGER_EMAIL", "")
 packager_year = os.environ.get("PACKAGER_YEAR", "")
@@ -1110,14 +1116,22 @@ if copyright_file and os.path.isfile(copyright_file):
 # License text completeness checking
 # ══════════════════════════════════════════════════════════════════════
 
-# Licenses available in /usr/share/common-licenses/ on this system
+# Licenses available in /usr/share/common-licenses/ on this system.
+# Under snap strict confinement the host path is inaccessible, so fall back to
+# the copy bundled inside the snap via the base-files stage-package.
 SYSTEM_COMMON_LICENSES = set()
-try:
-    for entry in os.listdir("/usr/share/common-licenses"):
-        SYSTEM_COMMON_LICENSES.add(entry)
-        # Also map short names: GPL-2+ -> GPL-2 exists
-except OSError:
-    pass
+for _cl_dir in (
+    "/usr/share/common-licenses",
+    os.path.join(os.environ.get("SNAP", ""), "usr/share/common-licenses"),
+):
+    try:
+        entries = os.listdir(_cl_dir)
+        if entries:
+            for entry in entries:
+                SYSTEM_COMMON_LICENSES.add(entry)
+            break
+    except OSError:
+        pass
 
 def check_license_completeness():
     """Check each referenced license has a complete text block.
@@ -2001,6 +2015,10 @@ def check_copyright_holders():
     # For each scanned file, find its governing stanza (last match wins)
     for r in scan_results:
         fp = r["path"].lstrip("./")
+        # Skip license/copying text files — copyright notices in license texts
+        # (e.g. FSF's copyright on the GPL text) are not project copyrights.
+        if Path(fp).name.lower() in _LICENSE_FILE_NAMES:
+            continue
         governing_glob = None
         for glob_pat, lic in stanzas:
             if fnmatch.fnmatch(fp, glob_pat) or glob_pat == "*":
@@ -2907,6 +2925,13 @@ if mode == "review":
     # Test 3: Mismatches
     status = "PASS" if real_count == 0 else "WARN" if real_count < 10 else "FAIL"
     print(f"[{status}] License mismatches: {real_count}")
+    if real_mismatches:
+        for (det, decl), files in sorted(real_mismatches.items()):
+            print(f"        Detected '{det}' but declared '{decl}' ({len(files)} file(s))")
+            for fp in files[:3]:
+                print(f"          {fp}")
+            if len(files) > 3:
+                print(f"          ... and {len(files) - 3} more")
 
     # Test 4: Missing licenses
     declared_lics = set(lic for _, lic in stanzas)
@@ -3001,19 +3026,24 @@ if mode == "review":
 
     # Test 11: Copyright holder accuracy
     missing_holders, extra_holders, _, _ = check_copyright_holders()
-    cop_total = len(missing_holders) + len(extra_holders)
-    if cop_total == 0:
+    if not missing_holders and not extra_holders:
         print("[PASS] Copyright holders match detected holders")
     else:
-        status = "WARN" if not missing_holders else "WARN"
-        print(f"[{status}] Copyright holder mismatches: "
-              f"{len(missing_holders)} missing, {len(extra_holders)} extra")
-        for glob_pat, holder in missing_holders[:3]:
-            print(f"        + {glob_pat}: {holder}")
-        for glob_pat, holder in extra_holders[:3]:
-            print(f"        - {glob_pat}: {holder}")
-        if cop_total > 6:
-            print(f"        ... and {cop_total - 6} more")
+        if missing_holders:
+            status = "WARN"
+            print(f"[{status}] Undeclared copyright holders: "
+                  f"{len(missing_holders)} detected in source but not in debian/copyright")
+            for glob_pat, holder in missing_holders[:3]:
+                print(f"        + {glob_pat}: {holder}")
+            if len(missing_holders) > 3:
+                print(f"        ... and {len(missing_holders) - 3} more")
+        if extra_holders:
+            print(f"[INFO] Declared holders not found in file headers: "
+                  f"{len(extra_holders)} (normal for files without embedded headers)")
+            for glob_pat, holder in extra_holders[:3]:
+                print(f"        {glob_pat}: {holder}")
+            if len(extra_holders) > 3:
+                print(f"        ... and {len(extra_holders) - 3} more")
 
     # Test 12: Decopy findings
     if decopy_issues:
@@ -3176,6 +3206,114 @@ if mode == "review":
             if len(files) > 5:
                 print(f"    ... and {len(files) - 5} more")
         print()
+
+    # ── Export full-detail findings ───────────────────────────────────
+    if export_file:
+        with open(export_file, "w") as ef:
+            ef.write("DEBIAN COPYRIGHT REVIEW — FULL EXPORT\n")
+            ef.write(f"Generated: {datetime.datetime.now().isoformat()}\n")
+            ef.write(f"Source: {os.environ.get('SRCDIR', '.')}\n")
+            ef.write(f"Scanner: {scanner}\n")
+            ef.write(f"Files scanned: {len(scan_results)}\n")
+            ef.write("=" * 78 + "\n\n")
+
+            if real_mismatches:
+                ef.write("LICENSE MISMATCHES\n")
+                ef.write("-" * 78 + "\n")
+                for (det, decl), files in sorted(real_mismatches.items()):
+                    ef.write(f"\nDetected: {det}\n")
+                    ef.write(f"Declared: {decl}\n")
+                    ef.write(f"Files ({len(files)}):\n")
+                    for fp in files:
+                        ef.write(f"  {fp}\n")
+                ef.write("\n")
+
+            if fp_mismatches:
+                ef.write("FALSE POSITIVE MISMATCHES\n")
+                ef.write("-" * 78 + "\n")
+                for cat in sorted(fp_mismatches):
+                    items = fp_mismatches[cat]
+                    ef.write(f"\nCategory: {cat} ({len(items)} file(s))\n")
+                    for fp, det, decl in items:
+                        ef.write(f"  {fp}  ({det} vs {decl})\n")
+                ef.write("\n")
+
+            if missing_in_copyright:
+                ef.write("UNDECLARED LICENSES\n")
+                ef.write("-" * 78 + "\n")
+                for ml in sorted(missing_in_copyright):
+                    ef.write(f"  {ml} (found in {all_scan_licenses[ml]} files)\n")
+                ef.write("\n")
+
+            if nonfree_found:
+                ef.write("NON-FREE LICENSES\n")
+                ef.write("-" * 78 + "\n")
+                for nf in nonfree_found:
+                    ef.write(f"  {nf}\n")
+                ef.write("\n")
+
+            if src_no_lic:
+                ef.write(f"SOURCE FILES WITHOUT LICENSE HEADER ({len(src_no_lic)})\n")
+                ef.write("-" * 78 + "\n")
+                for fp in src_no_lic:
+                    ef.write(f"  {fp}\n")
+                ef.write("\n")
+
+            if lic_issues:
+                ef.write("LICENSE TEXT ISSUES\n")
+                ef.write("-" * 78 + "\n")
+                for lic, sev, msg in lic_issues:
+                    ef.write(f"  [{sev.upper()}] {msg}\n")
+                ef.write("\n")
+
+            if src_uncovered:
+                ef.write(f"UNCOVERED SOURCE FILES ({len(src_uncovered)})\n")
+                ef.write("-" * 78 + "\n")
+                for fp, lics in src_uncovered:
+                    lic_str = ", ".join(lics) if lics else "(unknown)"
+                    ef.write(f"  {fp}  [{lic_str}]\n")
+                ef.write("\n")
+
+            if stale:
+                ef.write(f"STALE STANZA GLOBS ({len(stale)})\n")
+                ef.write("-" * 78 + "\n")
+                for glob_pat, lic in stale:
+                    ef.write(f"  {glob_pat}  ({lic})\n")
+                ef.write("\n")
+
+            if missing_holders or extra_holders:
+                ef.write("COPYRIGHT HOLDER MISMATCHES\n")
+                ef.write("-" * 78 + "\n")
+                for glob_pat, holder in missing_holders:
+                    ef.write(f"  + {glob_pat}: {holder}\n")
+                for glob_pat, holder in extra_holders:
+                    ef.write(f"  - {glob_pat}: {holder}\n")
+                ef.write("\n")
+
+            if decopy_issues:
+                ef.write(f"DECOPY FINDINGS ({len(decopy_issues)})\n")
+                ef.write("-" * 78 + "\n")
+                for line in decopy_issues:
+                    ef.write(f"  {line}\n")
+                ef.write("\n")
+
+            if low_confidence:
+                ef.write(f"LOW-CONFIDENCE DETECTIONS ({len(low_confidence)})\n")
+                ef.write("-" * 78 + "\n")
+                for path, lic, score in low_confidence:
+                    ef.write(f"  {path}  ({lic}, score={score})\n")
+                ef.write("\n")
+
+            if has_sanity_check and sanity_discrepancies:
+                ef.write(f"SCANNER CROSS-VALIDATION ({len(sanity_discrepancies)})\n")
+                ef.write("-" * 78 + "\n")
+                for fp, sc_l, lc_l in sanity_discrepancies:
+                    ef.write(f"  {fp}\n")
+                    ef.write(f"    scancode:     {sc_l}\n")
+                    ef.write(f"    licensecheck: {lc_l}\n")
+                ef.write("\n")
+
+        print(f"Full findings exported to: {export_file}")
 
 else:
     # ── Standard check report ─────────────────────────────────────────
