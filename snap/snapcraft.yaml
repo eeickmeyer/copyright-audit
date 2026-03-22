@@ -41,7 +41,6 @@ apps:
       - home
       - removable-media
       - network
-      - shared-memory
     environment:
       PATH: $SNAP/scancode/bin:$SNAP/usr/bin:$SNAP/bin:$PATH
       PYTHONPATH: $SNAP/scancode/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages
@@ -70,6 +69,51 @@ parts:
       "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install scancode-toolkit
       find "${SNAPCRAFT_PART_INSTALL}/scancode/bin" -maxdepth 1 -type f -exec \
         sed -i '1s|^#!.*python.*$|#!/usr/bin/env python3|' {} +
+      # Replace multiprocessing.Pool with a serial executor so scancode
+      # works under strict snap confinement (which blocks POSIX semaphores).
+      _pool="${SNAPCRAFT_PART_INSTALL}/scancode/lib/python3.12/site-packages/scancode/pool.py"
+      python3 -c "
+      import textwrap, pathlib
+      pathlib.Path('$_pool').write_text(textwrap.dedent('''
+          class _SerialResult:
+              def __init__(self, value):
+                  self._value = value
+              def get(self, timeout=None):
+                  return self._value
+
+          class _SerialPool:
+              def __init__(self, *a, **kw):
+                  pass
+              def imap_unordered(self, func, iterable, chunksize=1):
+                  for item in iterable:
+                      yield func(item)
+              def imap(self, func, iterable, chunksize=1):
+                  for item in iterable:
+                      yield func(item)
+              def apply_async(self, func, args=(), kwargs=None):
+                  return _SerialResult(func(*args, **(kwargs or {})))
+              def map(self, func, iterable, chunksize=None):
+                  return [func(item) for item in iterable]
+              def close(self):
+                  pass
+              def join(self):
+                  pass
+              def terminate(self):
+                  pass
+              def __enter__(self):
+                  return self
+              def __exit__(self, *a):
+                  pass
+
+          class ScanCodeTimeoutError(Exception):
+              pass
+
+          def get_pool(processes=None, initializer=None, initargs=(), maxtasksperchild=None):
+              if initializer:
+                  initializer(*initargs)
+              return _SerialPool()
+      ''').lstrip())
+      "
 
   runtime-deps:
     plugin: nil
