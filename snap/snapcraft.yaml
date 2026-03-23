@@ -68,6 +68,8 @@ parts:
       - libicu-dev
       - libffi-dev
       - libssl-dev
+      - libxml2-dev
+      - libxslt1-dev
     override-build: |
       python3 -m venv "${SNAPCRAFT_PART_INSTALL}/scancode"
       "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install --upgrade pip
