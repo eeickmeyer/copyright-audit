@@ -3311,15 +3311,6 @@ if mode == "review":
             if len(extra_holders) > _lim:
                 print(f"        ... and {len(extra_holders) - _lim} more")
 
-    # Test 12: Decopy findings
-    if decopy_issues:
-        print(f"[INFO] Decopy findings: {len(decopy_issues)} issue(s)")
-        _lim = len(decopy_issues) if verbose else 5
-        for line in decopy_issues[:_lim]:
-            print(f"        {line}")
-        if len(decopy_issues) > _lim:
-            print(f"        ... and {len(decopy_issues) - _lim} more")
-    
     # Test 13: Low-confidence detections
     if low_confidence:
         print(f"[INFO] Low-confidence license detections skipped: {len(low_confidence)}")
