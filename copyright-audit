@@ -560,6 +560,20 @@ _PREAMBLE_MAP = {
     "CC0": _cc0_preamble,
 }
 
+def _wrap_dep5_body(text, max_col=79):
+    """Re-wrap any lines in DEP-5 body text that exceed *max_col* chars."""
+    result = []
+    for line in text.split('\n'):
+        if line == ' .' or len(line) <= max_col:
+            result.append(line)
+        else:
+            content = line.lstrip(' ')
+            wrapped = textwrap.wrap(content, width=max_col - 1,
+                                    break_long_words=False,
+                                    break_on_hyphens=False)
+            result.extend(' ' + w for w in wrapped)
+    return '\n'.join(result)
+
 def _dep5_common_license_body(lic_name):
     """Build the full DEP-5 license body for a license in common-licenses.
     Returns the body text (with leading-space DEP-5 indentation) including
@@ -600,12 +614,13 @@ def _dep5_common_license_body(lic_name):
                 if version:
                     full_name += f" version {version}"
                 break
-        return (
+        body = (
             f"{preamble}\n"
             f" .\n"
-            f" On Debian systems, the complete text of {full_name}\n"
+            f" On Debian systems, the complete text of {full_name}"
             f" can be found in \"/usr/share/common-licenses/{slug}\"."
         )
+        return _wrap_dep5_body(body)
     else:
         # Fallback for unrecognized common-licenses entries
         return (
@@ -3665,8 +3680,12 @@ if mode == "review":
     versionless_ok = not versionless
     override_ok = not override_issues
     dup_ok = not dup_files
+    compat_ok = not all_compat
 
-    if (real_count == 0 and not missing_in_copyright and not nonfree_found
+    if not compat_ok:
+        print("VERDICT: BLOCKED — license incompatibility detected. "
+              "Must be resolved before archive acceptance.")
+    elif (real_count == 0 and not missing_in_copyright and not nonfree_found
             and lic_ok and cov_ok and not stale and dep5_ok
             and not missing_holders and fixme_ok and versionless_ok
             and override_ok and dup_ok):
@@ -5252,8 +5271,11 @@ else:
 
         # ── Fix 5: Propose debian/* stanza if missing ────────────────
         # Not applicable for native packages (3.0 (native)).
-        has_debian_glob = any(g in ("debian/*", "debian/**")
-                             for g, _ in stanzas)
+        # Re-check working_text (not the stale 'stanzas' list) because
+        # earlier fixes may have removed a debian/* stanza with Unknown.
+        has_debian_glob = bool(
+            re.search(r'^Files:[^\n]*\bdebian/\*', working_text, re.MULTILINE)
+        )
 
         # Build packager copyright string from detected identity
         packager_cop = ""
@@ -5302,9 +5324,25 @@ else:
                 print(f"  ✗ Skipped.\n")
         elif packager_cop:
             # debian/* stanza exists — check if packager is listed
-            deb_glob = next(g for g, _ in stanzas
-                            if g in ("debian/*", "debian/**"))
-            existing_cops = stanza_copyrights.get(deb_glob, [])
+            _deb_m = re.search(r'^Files:[^\n]*\b(debian/\*\*?)', working_text, re.MULTILINE)
+            deb_glob = _deb_m.group(1) if _deb_m else "debian/*"
+            # Extract copyright lines from working_text for the debian/* stanza
+            existing_cops = []
+            _deb_files_pat = r'(Files:[^\n]*(?:\n +[^\n]+)*)'
+            _deb_escaped = re.escape(deb_glob)
+            for _dfm in re.finditer(_deb_files_pat, working_text):
+                if re.search(r'(?:^Files:\s*|(?<=\n)\s+)' + _deb_escaped + r'\s*$',
+                             _dfm.group(0), re.MULTILINE):
+                    _drest = working_text[_dfm.end():]
+                    _dcop_m = re.match(r'\nCopyright:([^\n]*(?:\n +[^\n]+)*)', _drest)
+                    if _dcop_m:
+                        for _dcl in _dcop_m.group(0).split('\n'):
+                            _dcl = _dcl.strip()
+                            if _dcl.startswith("Copyright:"):
+                                _dcl = _dcl[len("Copyright:"):].strip()
+                            if _dcl:
+                                existing_cops.append(_dcl)
+                    break
             norm_packager = norm_copyright(packager_cop)
             if norm_packager:
                 packager_found = any(
@@ -5364,6 +5402,43 @@ else:
                         print(f"  ✗ Could not locate stanza (edit manually).\n")
                 else:
                     print(f"  ✗ Skipped.\n")
+            elif packager_year:
+                # Packager is listed — check if current year is present
+                cur_yr = int(packager_year)
+                matched_line = None
+                for ec in existing_cops:
+                    nc = norm_copyright(ec)
+                    if nc and (norm_packager in nc or nc in norm_packager):
+                        matched_line = ec
+                        break
+                if matched_line:
+                    years, author = _parse_copyright(matched_line)
+                    if cur_yr not in years:
+                        # Build updated line with the current year added
+                        years.add(cur_yr)
+                        syrs = sorted(years)
+                        parts = []
+                        start = prev = syrs[0]
+                        for y in syrs[1:]:
+                            if y == prev + 1:
+                                prev = y
+                            else:
+                                parts.append(f"{start}-{prev}" if prev > start else str(start))
+                                start = prev = y
+                        parts.append(f"{start}-{prev}" if prev > start else str(start))
+                        new_years = ", ".join(parts)
+                        updated_line = f"{new_years} {author}"
+
+                        print(f"Current year ({packager_year}) not in debian/* packager copyright:")
+                        print(f"    {matched_line}")
+                        print(f"  → {updated_line}\n")
+                        answer = ask("  Update year? [Y/n/A/X] ", batch=True).strip().lower()
+                        if answer not in ("n", "no"):
+                            working_text = working_text.replace(matched_line, updated_line, 1)
+                            changes_made += 1
+                            print(f"  ✓ Year updated.\n")
+                        else:
+                            print(f"  ✗ Skipped.\n")
 
         # ── Fix 6: Consolidate stanzas ───────────────────────────────
         # Re-check for consolidation opportunities against working_text
