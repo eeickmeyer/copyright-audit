@@ -32,7 +32,7 @@ lint:
     - library:
         - scancode/lib/python3.12/site-packages/extractcode_libarchive/lib/*
         - scancode/lib/python3.12/site-packages/typecode_libmagic/lib/*
-        - usr/lib/x86_64-linux-gnu/libgomp.so*
+        - usr/lib/*/libgomp.so*
 
 apps:
   copyright-audit:
@@ -45,7 +45,7 @@ apps:
       PATH: $SNAP/scancode/bin:$SNAP/usr/bin:$SNAP/bin:$PATH
       PYTHONPATH: $SNAP/scancode/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages
       PYTHONUNBUFFERED: "1"
-      PERL5LIB: $SNAP/usr/share/perl5:$SNAP/usr/lib/x86_64-linux-gnu/perl5/5.38
+      PERL5LIB: $SNAP/usr/share/perl5:$SNAP/usr/lib/x86_64-linux-gnu/perl5/5.38:$SNAP/usr/lib/aarch64-linux-gnu/perl5/5.38:$SNAP/usr/lib/s390x-linux-gnu/perl5/5.38:$SNAP/usr/lib/powerpc64le-linux-gnu/perl5/5.38:$SNAP/usr/lib/arm-linux-gnueabihf/perl5/5.38
       GIT_EXEC_PATH: $SNAP/usr/lib/git-core
       GIT_TEMPLATE_DIR: $SNAP/usr/share/git-core/templates
 
@@ -64,9 +64,15 @@ parts:
       - python3-dev
       - python3-venv
       - gcc
+      - pkg-config
+      - libicu-dev
     override-build: |
       python3 -m venv "${SNAPCRAFT_PART_INSTALL}/scancode"
       "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install --upgrade pip
+      # Pre-install extractcode to work around its invalid Requires-Python
+      # specifier (>=3.6.*) that causes pip backtracking on architectures
+      # without pre-built wheels (arm64, s390x, ppc64el, armhf).
+      "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install 'extractcode[full]>=31.0.0' --ignore-requires-python
       "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install scancode-toolkit
       find "${SNAPCRAFT_PART_INSTALL}/scancode/bin" -maxdepth 1 -type f -exec \
         sed -i '1s|^#!.*python.*$|#!/usr/bin/env python3|' {} +
