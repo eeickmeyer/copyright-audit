@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (5 037 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (5 720 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -32,24 +32,39 @@ interactive fixing.
 | 295–306 | Native-package detection | `_is_native_package()` — reads `debian/source/format` |
 | 307–325 | Built-in license texts | `_BUILTIN_LICENSE_TEXTS` dict (e.g. Unsplash license) |
 | 327–428 | License text fetcher | `fetch_license_text()`, `_fetch_cc_text()`, `_fetch_spdx_text()`, `_fetch_url()`, `format_license_body()` — downloads from SPDX API / Creative Commons |
-| 430–468 | Exclusion & metadata helpers | `is_excluded()`, `is_metadata_file()` — glob-matching utilities |
+| 430–468 | Exclusion & metadata helpers | `is_excluded()`, `is_metadata_file()` — glob-matching utilities; `_METADATA_GLOBS` includes `LICENSES/*` / `licenses/*` for REUSE spec |
 
-### License Normalization (lines 470–622)
+### DEP-5 License Boilerplate (lines 449–627)
+
+| Lines | Section | Purpose |
+|-------|---------|----------|
+| 449–550 | Preamble functions | `_gpl_preamble()`, `_lgpl_preamble()`, `_agpl_preamble()`, `_gfdl_preamble()`, `_apache_preamble()`, `_mpl_preamble()`, `_artistic_preamble()`, `_bsd_preamble()`, `_cc0_preamble()` — standard DEP-5 license preamble text with version/or-later placeholders |
+| 551–562 | `_PREAMBLE_MAP` | Maps license-name prefix to preamble function |
+| 563–576 | `_wrap_dep5_body()` | Re-wraps DEP-5 body lines exceeding 79 columns at word boundaries |
+| 577–627 | `_dep5_common_license_body()` | Builds full DEP-5 license body (preamble + common-licenses pointer) for any license in `/usr/share/common-licenses/` |
+
+### License Normalization (lines 674–822)
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 470–587 | `SPDX_TO_DEP5` | 130+ entry mapping dict from scanner output to DEP-5 names |
-| 588–598 | `to_dep5()` | Normalize any license ID to DEP-5 convention |
-| 600–607 | `SOURCE_EXTS` | Set of recognized source-code file extensions |
-| 608–622 | `norm_cmp()` | Normalize for comparison only (collapses aliases, strips versions) |
+| 674–787 | `SPDX_TO_DEP5` | 130+ entry mapping dict from scanner output to DEP-5 names |
+| 788–798 | `to_dep5()` | Normalize any license ID to DEP-5 convention |
+| 800–807 | `SOURCE_EXTS` | Set of recognized source-code file extensions |
+| 808–822 | `norm_cmp()` | Normalize for comparison only (collapses aliases, strips versions) |
 
-### Scan Result Parsing (lines 624–756)
+### Scan Result Parsing (lines 824–950)
 
 | Lines | Section | Purpose |
-|-------|---------|---------|
-| 624–693 | ScanCode JSON parser | Iterates `files[]`, extracts `license_detections` (with confidence filtering → `low_confidence` list) and `copyrights` |
-| 695–738 | licensecheck parser | Parses `--deb-machine` paragraph output |
-| 743–756 | `progress()` | Stderr progress bar for large scans |
+|-------|---------|----------|
+| 824–893 | ScanCode JSON parser | Iterates `files[]`, extracts `license_detections` (with confidence filtering → `low_confidence` list) and `copyrights` |
+| 895–938 | licensecheck parser | Parses `--deb-machine` paragraph output |
+| 940–950 | `progress()` | Stderr progress bar for large scans |
+
+### Binary Garbage Filter (line 952)
+
+| Lines | Function | Purpose |
+|-------|----------|----------|
+| 952–968 | `_is_plausible_copyright()` | Rejects copyright strings with < 70% printable ASCII or < 3 printable chars, eliminating binary file artifacts |
 
 ### Metadata Enrichment (lines 758–1130)
 
@@ -166,27 +181,27 @@ Structured pass/fail report with 19 tests.
 
 | Test | Lines | What it checks |
 |------|-------|----------------|
-| 1 | 2884 | DEP-5 format validation |
-| 2 | 2902 | Catch-all `Files: *` stanza |
-| 3 | 2925 | License mismatches (with inline details: detected vs. declared, affected files) |
-| 4 | 2936 | Undeclared licenses |
-| 5 | 2953 | License compatibility (loud `!`-banner on failure) |
-| 6 | 2969 | Non-free licenses in source |
-| 7 | 2979 | Source files without license headers |
-| 8 | 2984 | License text completeness |
-| 9 | 2999 | Stanza coverage (uncovered files) |
-| 10 | 3014 | Stale stanza globs |
-| 11 | 3027 | Copyright holder accuracy (undeclared = WARN; declared-not-detected = INFO) |
-| 12 | 3048 | Decopy findings |
-| 13 | 3056 | Low-confidence detections |
-| 14 | 3064 | Stanza consolidation opportunities |
-| 15 | 3080 | FIXME entries in copyright file |
-| 16 | 3100 | Versionless / invalid license identifiers |
-| 17 | 3116 | Broad glob override conflicts |
-| 18 | 3145 | Duplicate file declarations |
-| 19 | 3408 | Scanner cross-validation (2-of-3 consensus: WARN for all-disagree, INFO for consensus, PASS when all agree) |
+| 1 | 3375 | DEP-5 format validation |
+| 2 | 3393 | Catch-all `Files: *` stanza |
+| 3 | 3398 | License mismatches (with inline details: detected vs. declared, affected files) |
+| 4 | 3410 | Undeclared licenses |
+| 5 | 3427 | License compatibility (loud `!`-banner on failure; BLOCKED verdict) |
+| 6 | 3443 | Non-free licenses in source |
+| 7 | 3453 | Source files without license headers |
+| 8 | 3458 | License text completeness |
+| 9 | 3473 | Stanza coverage (uncovered files) |
+| 10 | 3489 | Stale stanza globs |
+| 11 | 3503 | Copyright holder accuracy (undeclared = WARN; declared-not-detected = INFO) |
+| 12 | 3530 | Decopy findings |
+| 13 | 3532 | Low-confidence detections |
+| 14 | 3541 | Stanza consolidation opportunities |
+| 15 | 3558 | FIXME entries in copyright file |
+| 16 | 3579 | Versionless / invalid license identifiers |
+| 17 | 3595 | Broad glob override conflicts |
+| 18 | 3625 | Duplicate file declarations |
+| 19 | 3646 | Scanner cross-validation (2-of-3 consensus: WARN for all-disagree, INFO for consensus, PASS when all agree) |
 
-Ends with verdict (lines 3185–3210), detailed mismatch appendix (lines 3197–3209), and optional `--export` full-detail findings writer (lines 3210–3316).
+Ends with verdict (lines 3680–3700) — four tiers: BLOCKED (license incompatibility), complete, minor issues, needs work. Detailed mismatch appendix and optional `--export` full-detail findings writer follow.
 
 ---
 
@@ -221,16 +236,21 @@ decopy-accelerated generate path is active.
 
 | Fix | Lines | What it does |
 |-----|-------|--------------|
-| 0 | 3683 | Apply DEP-5 format fixes (whitespace, tabs, blank continuations) |
-| 1 | 3701 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
-| 2 | 3833 | Remove stale globs that match no file |
-| 3 | 3869 | Add missing standalone `License:` text blocks (common-licenses ref or SPDX fetch) |
-| 4 | 3940 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |
-| 5 | 4236 | Propose `debian/*` packaging stanza (or add packager to existing one) |
-| 6 | 4338 | Consolidate stanzas sharing same license + authors |
-| 7 | 4435 | Normalize copyright lines (year ordering, email deobfuscation, brackets) |
-| 8 | 4495 | Replace inline license text with `/usr/share/common-licenses/` references |
-| — | 4576 | Write result: backup `.bak`, write changes, warn about remaining FIXME stubs |
+| 0 | 4343 | Apply DEP-5 format fixes (whitespace, tabs, blank continuations) |
+| 0b | 4361 | Populate header stubs (Upstream-Name, Source, Upstream-Contact from `debian/control`) |
+| 0c | 4435 | Remove FSF boilerplate copyright from GPL-family stanzas |
+| 0d | 4497 | Remove license text file paths (`LICENSES/*`) from per-file stanzas |
+| 1 | 4548 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
+| 1b | 4687 | Resolve `Unknown` license stanzas — covered by `Files: *` or needs scanner data |
+| 2 | 4805 | Remove stale globs that match no file |
+| 3 | 4841 | Add missing standalone `License:` text blocks (full DEP-5 boilerplate via `_dep5_common_license_body()` or SPDX fetch) |
+| 3b | 4911 | Fix empty/stub standalone license blocks (same boilerplate generation) |
+| 4 | 4976 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |
+| 5 | 5272 | Propose `debian/*` packaging stanza, add packager to existing one, or update packager year |
+| 6 | 5443 | Consolidate stanzas sharing same license + authors |
+| 7 | 5540 | Normalize copyright lines (year ordering, email deobfuscation, brackets) |
+| 8 | 5600 | Replace inline license text with `/usr/share/common-licenses/` references (uses `_dep5_common_license_body()`) |
+| — | 5680 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
 
 After fix mode, if the decopy-accelerated generate path is active (lines
 4609–4620), stdout is restored and the hardened file is emitted to stdout
@@ -280,11 +300,12 @@ Snap Store. Key design decisions:
 
 ## Adding New Features — Quick Reference
 
-- **New license mapping**: Add to `SPDX_TO_DEP5` dict (~line 470)
-- **New non-free license**: Add to `_NONFREE_RAW` set (~line 2340)
-- **New metadata enrichment**: Add a loop after the SVG/KDE/GNOME blocks (~line 965)
-- **New review test**: Add after Test 19 in the review block (~line 3150); update verdict logic
-- **New check section**: Add after Section 12 in the check block (~line 3510); update summary
-- **New interactive fix**: Add as Fix 9 before the write-result block (~line 4575)
-- **New compatibility rule**: Add to `check_license_compatibility()` (~line 1236)
-- **New false-positive category**: Add to `classify_fp()` (~line 2237) and `FP_LABELS` (~line 3232)
+- **New license mapping**: Add to `SPDX_TO_DEP5` dict (~line 674)
+- **New non-free license**: Add to `_NONFREE_RAW` set (~line 2540)
+- **New metadata enrichment**: Add a loop after the SVG/KDE/GNOME blocks (~line 1130)
+- **New review test**: Add after Test 19 in the review block (~line 3670); update verdict logic
+- **New check section**: Add after Section 12 in the check block (~line 4200); update summary
+- **New interactive fix**: Add as Fix 9 before the write-result block (~line 5680)
+- **New compatibility rule**: Add to `check_license_compatibility()` (~line 1626)
+- **New false-positive category**: Add to `classify_fp()` (~line 2437) and `FP_LABELS` (~line 3880)
+- **New license preamble**: Add to the preamble functions (~line 540) and `_PREAMBLE_MAP` (~line 551)
