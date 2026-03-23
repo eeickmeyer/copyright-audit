@@ -5,7 +5,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 ## Features
 
 - **Three modes**: check (default), generate, and review
-- **Generate mode**: when `decopy` is installed, seeds the initial file with decopy, then automatically runs the full check+fix pipeline to harden it; falls back to built-in generation otherwise
+- **Generate mode**: when `decopy` is installed, seeds the initial file with decopy, then automatically runs the full check+fix pipeline to harden it with DEP-5 boilerplate, packager identity (`debian/*` stanza), and scanner cross-validation; falls back to built-in generation otherwise
 - **DEP-5 validation**: field ordering, whitespace, required fields
 - **License mismatch detection**: scanner results vs. declared stanzas
 - **Copyright holder auditing**: missing/extra authors with fuzzy matching, Unicode name preservation, and DEP-5-aware `Files: *` handling (proposes precise stanzas instead of polluting the catch-all)
@@ -13,8 +13,12 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **Automatic license fetching**: from SPDX and Creative Commons APIs
 - **Non-free / DFSG detection**: SSPL, BUSL, CC-NC, CC-ND, and more
 - **Coverage analysis**: uncovered files and stale globs
+- **Image metadata enrichment**: extracts license, author, and year from SVG RDF/XML and XMP packets embedded in PNG, JPEG, TIFF, WebP, and other raster formats — no external dependencies
+- **Scanner cross-validation**: when multiple scanners are available, each secondary scanner independently cross-validates the primary's results by license family (e.g. scancode vs licensecheck AND scancode vs decopy)
 - **Compatibility checks**: Apache + GPL-2-only, EPL + GPL, CDDL + GPL, etc. — displayed with loud `!`-banner warnings
-- **Interactive fix mode**: proposes stanzas, removes stale globs, corrects formatting, adds missing holders and license text; normalizes year ordering and email addresses in existing stanzas; replaces inline license bodies for common licenses with `/usr/share/common-licenses/` references; each prompt accepts `A` (yes to all) or `X` (no to all) to batch-answer all remaining fixes
+- **Interactive fix mode**: proposes stanzas, removes stale globs, corrects formatting, adds missing holders and license text; normalizes year ordering and email addresses in existing stanzas; replaces inline license bodies for common licenses with `/usr/share/common-licenses/` references; generates full DEP-5 boilerplate for GPL, LGPL, AGPL, GFDL, Apache, MPL, Artistic, BSD, and CC0 license blocks; strips FSF boilerplate copyright holders and REUSE-spec license file paths; each prompt accepts `A` (yes to all) or `X` (no to all) to batch-answer all remaining fixes
+- **Packager management**: automatically proposes a `debian/*` stanza with the current user's identity; adds the packager to existing stanzas; updates the year range when the current year is missing
+- **Review verdicts**: four-tier verdict (BLOCKED for license incompatibility, complete, minor issues, needs work)
 - **Unresolved stub warning**: after writing, any remaining `FIXME`/`TODO`/`PLACEHOLDER` tokens are reported with their line numbers
 - **Email deobfuscation**: converts "alice at example dot com" and similar patterns to proper addresses; normalizes parenthesized emails to angle brackets
 - **Corporate suffix awareness**: names ending in Inc., Ltd., LLC, GmbH, and similar suffixes are never split on commas
@@ -36,7 +40,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 snap install copyright-audit --classic
 ```
 
-The snap bundles ScanCode Toolkit, licensecheck, and decopy.
+The snap bundles ScanCode Toolkit, licensecheck, decopy, and Debian common-licenses.
 
 ### Manual
 
@@ -69,6 +73,7 @@ copyright-audit --fix --yes [source-dir]
 | `-o, --output FILE` | Output file (generate mode) |
 | `-f, --fix` | Enter interactive fix mode |
 | `--yes` | Auto-accept all fixes (no prompts) |
+| `--export FILE` | Export full review findings to file (review mode) |
 | `-v, --verbose` | Include likely false positives |
 | `--no-fetch` | Skip license text downloads |
 | `-j, --jobs N` | Parallel ScanCode workers (default: nproc) |

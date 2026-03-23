@@ -34,6 +34,7 @@
 #   -f, --fix               Interactively fix issues found (check mode only)
 #   --yes                   Auto-accept all fixes (use with --fix, no prompts)
 #   -v, --verbose           Show all mismatches including likely false positives
+#   --export FILE          Export full review findings to FILE (review mode)
 #   --no-fetch              Don't download license text from SPDX/CC (use FIXME stubs)
 #   -j, --jobs N            Parallel scancode workers (default: nproc)
 #   -h, --help              Show this help
@@ -52,6 +53,7 @@ set -euo pipefail
 MODE="check"
 EXCLUDE_PATTERNS=()
 OUTPUT=""
+EXPORT=""
 VERBOSE=false
 FIX_MODE=false
 YES_MODE=false
@@ -78,6 +80,9 @@ while [[ $# -gt 0 ]]; do
             FIX_MODE=true; shift ;;
         --yes)
             YES_MODE=true; shift ;;
+        --export)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
+            EXPORT="$2"; shift 2 ;;
         -v|--verbose)
             VERBOSE=true; shift ;;
         --no-fetch)
@@ -158,6 +163,31 @@ echo "" >&2
 # ── Run scanner ───────────────────────────────────────────────────────
 cd "$SRCDIR"
 
+# ── Decopy-accelerated generation ─────────────────────────────────────
+# In generate mode, run decopy FIRST (fast) to produce the initial
+# debian/copyright.  The slower scanner runs after so its results can
+# harden the file via check+fix.
+DECOPY_GENERATED="false"
+if [[ "$MODE" == "generate" ]] && command -v decopy >/dev/null 2>&1; then
+    _GEN_TARGET="${OUTPUT:-$SRCDIR/debian/copyright}"
+    mkdir -p "$(dirname "$_GEN_TARGET")" 2>/dev/null || true
+    echo "Generating initial copyright with decopy..." >&2
+    if decopy --progress . > "$_GEN_TARGET" && [[ -s "$_GEN_TARGET" ]]; then
+        echo "Hardening with scanner cross-validation and DEP-5 fixes..." >&2
+        COPYRIGHT_FILE="$_GEN_TARGET"
+        MODE="check"
+        FIX_MODE="true"
+        YES_MODE="true"
+        DECOPY_GENERATED="true"
+        # Exclude the generated file from scanning to prevent feedback loop
+        _relcop="${COPYRIGHT_FILE#"$SRCDIR/"}"
+        EXCLUDE_PATTERNS+=("$_relcop" "${_relcop}.bak")
+    else
+        echo "decopy produced no output; falling back to built-in generator." >&2
+        rm -f "$_GEN_TARGET"
+    fi
+fi
+
 if [[ "$SCANNER" == "scancode" ]]; then
     echo "Running ScanCode (SPDX database)... this may take several minutes." >&2
     SC_ARGS=(--license --copyright --json "$_WORKDIR/scancode.json")
@@ -185,11 +215,13 @@ if [[ "$SCANNER" == "scancode" ]]; then
     fi
 
     # Run decopy as a sanity check if available and in check/review mode
-    if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1 \
+    # Skip if decopy already generated the file (avoid running it twice).
+    if [[ "$MODE" != "generate" && "$DECOPY_GENERATED" != "true" ]] \
+       && command -v decopy >/dev/null 2>&1 \
        && [[ -n "$COPYRIGHT_FILE" ]]; then
         echo "Running decopy as sanity check..." >&2
-        decopy --mode full --copyright-file "$COPYRIGHT_FILE" --quiet . \
-            > "$_WORKDIR/decopy.txt" 2>&1 || true
+        decopy --mode full --progress --copyright-file "$COPYRIGHT_FILE" . \
+            > "$_WORKDIR/decopy.txt" || true
     fi
 else
     echo "Running licensecheck..." >&2
@@ -202,39 +234,17 @@ else
     SCAN_FILE="$_WORKDIR/licensecheck.txt"
 
     # Also run decopy if available and in check/review mode
-    if [[ "$MODE" != "generate" ]] && command -v decopy >/dev/null 2>&1; then
+    # Skip if decopy already generated the file (avoid running it twice).
+    if [[ "$MODE" != "generate" && "$DECOPY_GENERATED" != "true" ]] \
+       && command -v decopy >/dev/null 2>&1; then
         echo "Running decopy..." >&2
-        decopy --mode full --copyright-file "$COPYRIGHT_FILE" --quiet . \
-            > "$_WORKDIR/decopy.txt" 2>&1 || true
+        decopy --mode full --progress --copyright-file "$COPYRIGHT_FILE" . \
+            > "$_WORKDIR/decopy.txt" || true
     fi
 fi
 
 echo "Analyzing..." >&2
 echo "" >&2
-
-# ── Decopy-accelerated generation ─────────────────────────────────────
-# If generate mode and decopy is available, let decopy produce the initial
-# debian/copyright, then switch to check+fix+yes to harden it with scanner
-# cross-validation, DEP-5 normalization, and license text fetching.
-DECOPY_GENERATED="false"
-if [[ "$MODE" == "generate" ]] && command -v decopy >/dev/null 2>&1; then
-    _GEN_TARGET="${OUTPUT:-$_WORKDIR/generated.copyright}"
-    if [[ -n "$OUTPUT" ]]; then
-        mkdir -p "$(dirname "$OUTPUT")" 2>/dev/null || true
-    fi
-    echo "Generating initial copyright with decopy..." >&2
-    if decopy . > "$_GEN_TARGET" && [[ -s "$_GEN_TARGET" ]]; then
-        echo "Hardening with scanner cross-validation and DEP-5 fixes..." >&2
-        COPYRIGHT_FILE="$_GEN_TARGET"
-        MODE="check"
-        FIX_MODE="true"
-        YES_MODE="true"
-        DECOPY_GENERATED="true"
-    else
-        echo "decopy produced no output; falling back to built-in generator." >&2
-        rm -f "$_GEN_TARGET"
-    fi
-fi
 
 # ── Pass state to Python ─────────────────────────────────────────────
 # ── Resolve symlinks flag for Python ──────────────────────────────────
@@ -260,11 +270,22 @@ fi
 
 PACKAGER_YEAR="$(date +%Y)"
 HAS_SANITY_CHECK="false"
-if [[ "$SCANNER" == "scancode" && -s "$_WORKDIR/licensecheck_sanity.txt" ]]; then
+SANITY_TOOLS=""
+if [[ "$SCANNER" == "scancode" ]]; then
+    if [[ -s "$_WORKDIR/licensecheck_sanity.txt" ]]; then
+        HAS_SANITY_CHECK="true"
+        SANITY_TOOLS="licensecheck"
+    fi
+    if [[ -s "$_WORKDIR/decopy.txt" ]]; then
+        HAS_SANITY_CHECK="true"
+        SANITY_TOOLS="${SANITY_TOOLS:+$SANITY_TOOLS,}decopy"
+    fi
+elif [[ "$SCANNER" == "licensecheck" && -s "$_WORKDIR/decopy.txt" ]]; then
     HAS_SANITY_CHECK="true"
+    SANITY_TOOLS="decopy"
 fi
-export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FILE OUTPUT
-export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR HAS_SANITY_CHECK DECOPY_GENERATED
+export EXCLUDE_STR VERBOSE FIX_MODE YES_MODE NO_FETCH SCANNER MODE COPYRIGHT_FILE OUTPUT EXPORT
+export PACKAGER_NAME PACKAGER_EMAIL PACKAGER_YEAR HAS_SANITY_CHECK SANITY_TOOLS DECOPY_GENERATED
 
 python3 - "$SCAN_FILE" << 'PYEOF'
 import datetime, json, os, re, subprocess, sys, fnmatch, textwrap, unicodedata, glob as globmod
@@ -283,10 +304,12 @@ verbose = os.environ.get("VERBOSE", "false") == "true"
 fix_mode = os.environ.get("FIX_MODE", "false") == "true"
 yes_mode = os.environ.get("YES_MODE", "false") == "true"
 no_fetch = os.environ.get("NO_FETCH", "false") == "true"
+export_file = os.environ.get("EXPORT", "")
 packager_name = os.environ.get("PACKAGER_NAME", "")
 packager_email = os.environ.get("PACKAGER_EMAIL", "")
 packager_year = os.environ.get("PACKAGER_YEAR", "")
 has_sanity_check = os.environ.get("HAS_SANITY_CHECK", "false") == "true"
+sanity_tools = [t for t in os.environ.get("SANITY_TOOLS", "").split(",") if t]
 _decopy_generated = os.environ.get("DECOPY_GENERATED", "false") == "true"
 
 # ── Detect native Debian packages ─────────────────────────────────────
@@ -424,6 +447,187 @@ def format_license_body(text, max_col=80):
                     lines.append(" " + leading + wl)
     return "\n".join(lines)
 
+# ── Standard DEP-5 boilerplate preambles for common licenses ─────────
+# Each entry maps a license-name prefix to (preamble_template, version_word).
+# The preamble_template uses {version} for the version number and
+# {or_later} for the "or later" clause.  The slug for common-licenses
+# is derived automatically (strip trailing +).
+
+def _gpl_preamble(version, or_later):
+    return (
+        f" This program is free software: you can redistribute it and/or modify\n"
+        f" it under the terms of the GNU General Public License as published by\n"
+        f" the Free Software Foundation, version {version}{or_later}.\n"
+        f" .\n"
+        f" This package is distributed in the hope that it will be useful,\n"
+        f" but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+        f" MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n"
+        f" GNU General Public License for more details.\n"
+        f" .\n"
+        f" You should have received a copy of the GNU General Public License\n"
+        f" along with this program. If not, see <https://www.gnu.org/licenses/>."
+    )
+
+def _lgpl_preamble(version, or_later):
+    return (
+        f" This program is free software: you can redistribute it and/or modify\n"
+        f" it under the terms of the GNU Lesser General Public License as\n"
+        f" published by the Free Software Foundation, version {version}{or_later}.\n"
+        f" .\n"
+        f" This package is distributed in the hope that it will be useful,\n"
+        f" but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+        f" MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n"
+        f" GNU Lesser General Public License for more details.\n"
+        f" .\n"
+        f" You should have received a copy of the GNU Lesser General Public License\n"
+        f" along with this program. If not, see <https://www.gnu.org/licenses/>."
+    )
+
+def _agpl_preamble(version, or_later):
+    return (
+        f" This program is free software: you can redistribute it and/or modify\n"
+        f" it under the terms of the GNU Affero General Public License as\n"
+        f" published by the Free Software Foundation, version {version}{or_later}.\n"
+        f" .\n"
+        f" This package is distributed in the hope that it will be useful,\n"
+        f" but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+        f" MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n"
+        f" GNU Affero General Public License for more details.\n"
+        f" .\n"
+        f" You should have received a copy of the GNU Affero General Public License\n"
+        f" along with this program. If not, see <https://www.gnu.org/licenses/>."
+    )
+
+def _gfdl_preamble(version, or_later):
+    return (
+        f" Permission is granted to copy, distribute and/or modify this document\n"
+        f" under the terms of the GNU Free Documentation License, Version {version}{or_later},\n"
+        f" with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts."
+    )
+
+def _apache_preamble(version, or_later):
+    return (
+        f" Licensed under the Apache License, Version {version} (the \"License\");\n"
+        f" you may not use this file except in compliance with the License.\n"
+        f" You may obtain a copy of the License at\n"
+        f" .\n"
+        f"     https://www.apache.org/licenses/LICENSE-2.0\n"
+        f" .\n"
+        f" Unless required by applicable law or agreed to in writing, software\n"
+        f" distributed under the License is distributed on an \"AS IS\" BASIS,\n"
+        f" WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n"
+        f" See the License for the specific language governing permissions and\n"
+        f" limitations under the License."
+    )
+
+def _mpl_preamble(version, or_later):
+    return (
+        f" This Source Code Form is subject to the terms of the Mozilla Public\n"
+        f" License, v. {version}. If a copy of the MPL was not distributed with this\n"
+        f" file, You can obtain one at https://mozilla.org/MPL/{version}/."
+    )
+
+def _artistic_preamble(version, or_later):
+    return (
+        f" This program is free software; you can redistribute it and/or modify\n"
+        f" it under the terms of the Artistic License."
+    )
+
+def _bsd_preamble(version, or_later):
+    return (
+        f" Redistribution and use in source and binary forms, with or without\n"
+        f" modification, are permitted provided that the conditions in the\n"
+        f" BSD license are met."
+    )
+
+def _cc0_preamble(version, or_later):
+    return (
+        f" To the extent possible under law, the author(s) have dedicated all\n"
+        f" copyright and related and neighboring rights to this software to the\n"
+        f" public domain worldwide. This software is distributed without any warranty."
+    )
+
+# Map license-name prefix → preamble function
+_PREAMBLE_MAP = {
+    "GPL": _gpl_preamble,
+    "LGPL": _lgpl_preamble,
+    "AGPL": _agpl_preamble,
+    "GFDL": _gfdl_preamble,
+    "Apache": _apache_preamble,
+    "MPL": _mpl_preamble,
+    "Artistic": _artistic_preamble,
+    "BSD": _bsd_preamble,
+    "CC0": _cc0_preamble,
+}
+
+def _wrap_dep5_body(text, max_col=79):
+    """Re-wrap any lines in DEP-5 body text that exceed *max_col* chars."""
+    result = []
+    for line in text.split('\n'):
+        if line == ' .' or len(line) <= max_col:
+            result.append(line)
+        else:
+            content = line.lstrip(' ')
+            wrapped = textwrap.wrap(content, width=max_col - 1,
+                                    break_long_words=False,
+                                    break_on_hyphens=False)
+            result.extend(' ' + w for w in wrapped)
+    return '\n'.join(result)
+
+def _dep5_common_license_body(lic_name):
+    """Build the full DEP-5 license body for a license in common-licenses.
+    Returns the body text (with leading-space DEP-5 indentation) including
+    the standard preamble and the common-licenses pointer."""
+    slug = lic_name.rstrip("+")
+    or_later = " or (at your option) any later version" if lic_name.endswith("+") else ""
+
+    # Parse version number from the license name
+    m = re.match(r'[A-Za-z]+-(.+)', slug)
+    version = m.group(1) if m else ""
+
+    # Find the matching preamble function
+    preamble_fn = None
+    for prefix, fn in _PREAMBLE_MAP.items():
+        if lic_name.startswith(prefix):
+            preamble_fn = fn
+            break
+
+    if preamble_fn:
+        preamble = preamble_fn(version, or_later)
+        # GFDL and CC0 don't need the common-licenses pointer in all cases,
+        # but including it is standard practice.
+        full_name_map = {
+            "GPL": "GNU General Public License",
+            "LGPL": "GNU Lesser General Public License",
+            "AGPL": "GNU Affero General Public License",
+            "GFDL": "GNU Free Documentation License",
+            "Apache": "Apache License",
+            "MPL": "Mozilla Public License",
+            "Artistic": "Artistic License",
+            "BSD": "BSD License",
+            "CC0": "Creative Commons Zero License",
+        }
+        full_name = "this license"
+        for prefix, name in full_name_map.items():
+            if lic_name.startswith(prefix):
+                full_name = f"the {name}"
+                if version:
+                    full_name += f" version {version}"
+                break
+        body = (
+            f"{preamble}\n"
+            f" .\n"
+            f" On Debian systems, the complete text of {full_name}"
+            f" can be found in \"/usr/share/common-licenses/{slug}\"."
+        )
+        return _wrap_dep5_body(body)
+    else:
+        # Fallback for unrecognized common-licenses entries
+        return (
+            f" On Debian systems, the full text of this license can be found in\n"
+            f" `/usr/share/common-licenses/{slug}'."
+        )
+
 exclude_raw = os.environ.get("EXCLUDE_STR", "").strip()
 excludes = [p for p in exclude_raw.split("\n") if p]
 
@@ -444,6 +648,8 @@ _METADATA_GLOBS = (
     "usr/share/plymouth/themes/*/*.plymouth",
     "etc/*",
     "po/*",
+    "LICENSES/*",       # REUSE spec: whole license text files
+    "licenses/*",
 )
 _METADATA_BASENAMES = frozenset({
     "AUTHORS", "COPYING", "COPYING.txt", "NEWS", "README", "README.md",
@@ -737,6 +943,29 @@ else:
 # Skip symlinks in licensecheck results too
 scan_results = [r for r in scan_results if not os.path.islink(r["path"].lstrip("./"))]
 
+# ── Filter binary-garbage copyright strings ──────────────────────────
+# licensecheck sometimes interprets binary data inside PNG/GIF/etc.
+# as copyright text, producing nonsense holders full of non-printable
+# or non-ASCII characters.  Reject those strings early.
+_PRINTABLE_RANGE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}  # tab, LF, CR
+
+def _is_plausible_copyright(s):
+    """Return True if *s* looks like a real copyright holder string."""
+    if not s or not s.strip():
+        return False
+    # At least 3 printable-ASCII characters required
+    ascii_printable = sum(1 for c in s if ord(c) in _PRINTABLE_RANGE)
+    if ascii_printable < 3:
+        return False
+    # Reject if more than 30 % of characters are outside printable ASCII
+    ratio = ascii_printable / len(s)
+    if ratio < 0.70:
+        return False
+    return True
+
+for _r in scan_results:
+    _r["copyrights"] = [c for c in _r["copyrights"] if _is_plausible_copyright(c)]
+
 total_files = len(scan_results)
 print(f"  {total_files} files to analyze.", file=sys.stderr)
 
@@ -922,6 +1151,159 @@ for _r in scan_results:
     if _svg_creator and _svg_creator not in _r["copyrights"]:
         _r["copyrights"].append(_svg_creator)
         _enriched_count += 1
+
+# ── XMP metadata enrichment for raster images ────────────────────────
+# JPEG, PNG, TIFF, WebP and other image formats commonly embed XMP
+# (Extensible Metadata Platform) packets — the same RDF/XML used in
+# SVGs — containing dc:creator, cc:license, dc:rights, and date info.
+# This extracts that XML via byte-string search (no external library
+# needed) and reuses _cc_url_to_dep5() for license normalisation.
+_XMP_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff",
+    ".webp", ".gif", ".bmp", ".ico",
+})
+_XMP_RIGHTS_NS = "http://ns.adobe.com/xap/1.0/rights/"
+_XMP_NS = "http://ns.adobe.com/xap/1.0/"
+_PHOTOSHOP_NS = "http://ns.adobe.com/photoshop/1.0/"
+
+def _extract_xmp_xml(filepath, max_read=2 * 1024 * 1024):
+    """Extract the XMP XML packet from a binary file.
+    Returns the XML as a string, or None if no XMP is found.
+    Reads at most *max_read* bytes to avoid loading huge files."""
+    try:
+        with open(filepath, "rb") as fh:
+            data = fh.read(max_read)
+    except OSError:
+        return None
+    # Look for xpacket or xmpmeta start markers
+    start = data.find(b"<x:xmpmeta")
+    if start < 0:
+        start = data.find(b"<?xpacket")
+    if start < 0:
+        return None
+    # Find matching end
+    end = data.find(b"</x:xmpmeta>", start)
+    if end >= 0:
+        end += len(b"</x:xmpmeta>")
+    else:
+        end = data.find(b"<?xpacket end", start)
+        if end >= 0:
+            end = data.find(b"?>", end)
+            if end >= 0:
+                end += 2
+    if end < 0:
+        return None
+    try:
+        return data[start:end].decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+for _r in scan_results:
+    _fp = _r["path"].lstrip("./")
+    _ext = os.path.splitext(_fp)[1].lower()
+    if _ext not in _XMP_IMAGE_EXTS:
+        continue
+    _xmp_xml = _extract_xmp_xml(_fp)
+    if not _xmp_xml:
+        continue
+    try:
+        _xmp_root = ET.fromstring(_xmp_xml)
+    except ET.ParseError:
+        continue
+
+    _xmp_lic = None
+    _xmp_creator = None
+    _xmp_rights = None
+    _xmp_year = None
+
+    _CC_NS = "http://creativecommons.org/ns#"
+    _DC_NS = "http://purl.org/dc/elements/1.1/"
+    _RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+
+    for _el in _xmp_root.iter():
+        _tag = _el.tag
+
+        # cc:license — rdf:resource attribute holds the URL
+        if _tag == f"{{{_CC_NS}}}license" and not _xmp_lic:
+            _lic_url = _el.get(f"{{{_RDF_NS}}}resource", "")
+            if _lic_url:
+                _xmp_lic = _cc_url_to_dep5(_lic_url)
+        elif _tag == f"{{{_CC_NS}}}License" and not _xmp_lic:
+            _lic_url = _el.get(f"{{{_RDF_NS}}}about", "")
+            if _lic_url:
+                _xmp_lic = _cc_url_to_dep5(_lic_url)
+
+        # xmpRights:WebStatement — fallback license URL
+        elif _tag == f"{{{_XMP_RIGHTS_NS}}}WebStatement" and not _xmp_lic:
+            _ws = (_el.text or "").strip()
+            if _ws:
+                _xmp_lic = _cc_url_to_dep5(_ws)
+
+        # dc:creator > rdf:Seq > rdf:li  or  dc:creator (flat text)
+        elif _tag == f"{{{_DC_NS}}}creator" and not _xmp_creator:
+            _seq = _el.find(f"{{{_RDF_NS}}}Seq")
+            if _seq is not None:
+                _li = _seq.find(f"{{{_RDF_NS}}}li")
+                if _li is not None and _li.text and _li.text.strip():
+                    _xmp_creator = _li.text.strip()
+            elif _el.text and _el.text.strip():
+                _xmp_creator = _el.text.strip()
+
+        # photoshop:Credit — alternative author source
+        elif _tag == f"{{{_PHOTOSHOP_NS}}}Credit" and not _xmp_creator:
+            _cr = (_el.text or "").strip()
+            if _cr:
+                _xmp_creator = _cr
+
+        # dc:rights > rdf:Alt > rdf:li — copyright string
+        elif _tag == f"{{{_DC_NS}}}rights" and not _xmp_rights:
+            _alt = _el.find(f"{{{_RDF_NS}}}Alt")
+            if _alt is not None:
+                _li = _alt.find(f"{{{_RDF_NS}}}li")
+                if _li is not None and _li.text and _li.text.strip():
+                    _xmp_rights = _li.text.strip()
+
+        # xmp:CreateDate — extract year
+        elif _tag == f"{{{_XMP_NS}}}CreateDate" and not _xmp_year:
+            _dt = (_el.text or "").strip()
+            _ym = re.match(r'(\d{4})', _dt)
+            if _ym:
+                _xmp_year = _ym.group(1)
+
+    if not _xmp_lic and not _xmp_creator and not _xmp_rights:
+        continue
+
+    # License: override scanner's detection when XMP is present
+    if _xmp_lic:
+        _old_lics = _r["licenses"]
+        _new_lic = to_dep5(_xmp_lic)
+        if _old_lics != [_new_lic]:
+            _r["licenses"] = [_new_lic]
+            if _old_lics:
+                print(f"  XMP metadata override: {_fp}: "
+                      f"{', '.join(_old_lics)} → {_new_lic}",
+                      file=sys.stderr)
+            _enriched_count += 1
+
+    # Copyright holder: prefer dc:creator, fall back to dc:rights text
+    _holder = _xmp_creator
+    if not _holder and _xmp_rights:
+        # Parse "Copyright 2024 Some Author" to extract the author part
+        _stripped = re.sub(
+            r'^(?:copyright|\(c\)|©)\s*\d[\d,\s-]*', '',
+            _xmp_rights, flags=re.IGNORECASE,
+        ).strip()
+        if _stripped:
+            _holder = _stripped
+    if _holder:
+        # Prepend year if we have one and it's not already in copyrights
+        if _xmp_year and not any(_xmp_year in c for c in _r["copyrights"]):
+            _holder_with_year = f"{_xmp_year} {_holder}"
+        else:
+            _holder_with_year = _holder
+        if _holder_with_year not in _r["copyrights"] and _holder not in _r["copyrights"]:
+            _r["copyrights"].append(_holder_with_year)
+            _enriched_count += 1
 
 # ── GNOME background-properties XML enrichment ───────────────────────
 for _xml_path in globmod.glob("usr/share/gnome-background-properties/*.xml"):
@@ -1110,14 +1492,22 @@ if copyright_file and os.path.isfile(copyright_file):
 # License text completeness checking
 # ══════════════════════════════════════════════════════════════════════
 
-# Licenses available in /usr/share/common-licenses/ on this system
+# Licenses available in /usr/share/common-licenses/ on this system.
+# Under snap strict confinement the host path is inaccessible, so fall back to
+# the copy bundled inside the snap via the base-files stage-package.
 SYSTEM_COMMON_LICENSES = set()
-try:
-    for entry in os.listdir("/usr/share/common-licenses"):
-        SYSTEM_COMMON_LICENSES.add(entry)
-        # Also map short names: GPL-2+ -> GPL-2 exists
-except OSError:
-    pass
+for _cl_dir in (
+    "/usr/share/common-licenses",
+    os.path.join(os.environ.get("SNAP", ""), "usr/share/common-licenses"),
+):
+    try:
+        entries = os.listdir(_cl_dir)
+        if entries:
+            for entry in entries:
+                SYSTEM_COMMON_LICENSES.add(entry)
+            break
+    except OSError:
+        pass
 
 def check_license_completeness():
     """Check each referenced license has a complete text block.
@@ -2001,13 +2391,30 @@ def check_copyright_holders():
     # For each scanned file, find its governing stanza (last match wins)
     for r in scan_results:
         fp = r["path"].lstrip("./")
+        # Skip license/copying text files — copyright notices in license texts
+        # (e.g. FSF's copyright on the GPL text) are not project copyrights.
+        if Path(fp).name.lower() in _LICENSE_FILE_NAMES:
+            continue
         governing_glob = None
         for glob_pat, lic in stanzas:
             if fnmatch.fnmatch(fp, glob_pat) or glob_pat == "*":
                 governing_glob = glob_pat
         if governing_glob is not None:
+            # Detect GPL-family licenses on this file so we can suppress
+            # FSF's copyright on the license text itself (not a project
+            # copyright — scanners attribute it from the GPL boilerplate).
+            _file_lics = " ".join(r.get("licenses", [])).lower()
+            _is_gpl_family = bool(re.search(
+                r'\b(gpl|lgpl|agpl|gfdl|gnu)\b', _file_lics))
             for c in r.get("copyrights", []):
                 if c:
+                    # Skip FSF copyright that scanners pull from GPL
+                    # license boilerplate — this is the license author,
+                    # not a project copyright holder.
+                    if _is_gpl_family and re.search(
+                            r'free\s+software\s+foundation',
+                            c, re.IGNORECASE):
+                        continue
                     detected_per_glob[governing_glob].add(c)
                     holder_file_map[(governing_glob, c)].add(fp)
                     if governing_glob == "*":
@@ -2402,7 +2809,16 @@ if mode == "generate":
         if is_metadata_file(fp):
             continue  # covered by Files: * catch-all
         lic_key = tuple(sorted(set(to_dep5(l) for l in r["licenses"])))
-        file_entries.append({"path": fp, "lic": lic_key, "cops": list(r["copyrights"])})
+        # Filter FSF boilerplate copyright from GPL-family files — the FSF
+        # holds the copyright on the GPL text itself, not on the project.
+        _file_lics = " ".join(r.get("licenses", [])).lower()
+        _is_gpl = bool(re.search(r'\b(gpl|lgpl|agpl|gfdl|gnu)\b', _file_lics))
+        cops = [
+            c for c in r["copyrights"]
+            if not (_is_gpl and re.search(
+                r'free\s+software\s+foundation', c, re.IGNORECASE))
+        ]
+        file_entries.append({"path": fp, "lic": lic_key, "cops": cops})
 
     # Count files per license to pick the catch-all license
     lic_counts = defaultdict(int)
@@ -2671,9 +3087,7 @@ if mode == "generate":
     for lic in sorted(all_lics):
         out.append(f"License: {lic}")
         if lic in COMMON_LICENSES:
-            slug = lic.rstrip("+")
-            out.append(f" On Debian systems, the full text of this license can be found in")
-            out.append(f" `/usr/share/common-licenses/{slug}'.")
+            out.append(_dep5_common_license_body(lic))
         else:
             # Try to fetch the full text
             fetched = fetch_license_text(lic)
@@ -2753,73 +3167,97 @@ if os.path.isfile(decopy_file):
     except Exception:
         pass
 
-# Load licensecheck sanity-check results if available (scancode primary)
-sanity_results = {}  # path → set of license strings
-sanity_file = os.path.join(os.path.dirname(scan_file), "licensecheck_sanity.txt")
-if has_sanity_check and os.path.isfile(sanity_file):
-    try:
-        with open(sanity_file, encoding="utf-8") as f:
-            sanity_content = f.read()
-        SKIP_LIC = {"UNKNOWN"}
-        for para in sanity_content.split("\n\n"):
-            para = para.strip()
-            if not para.startswith("Files:"):
-                continue
-            lines = para.split("\n")
-            file_lines = []
-            lic_line = None
-            in_files = True
-            for line in lines:
-                if line.startswith("Files:"):
-                    rest = line[6:].strip()
-                    if rest:
-                        file_lines.append(rest)
-                    in_files = True
-                elif line.startswith("Copyright:"):
-                    in_files = False
-                elif line.startswith("License:"):
-                    in_files = False
-                    lic_line = line[8:].strip()
-                elif in_files and line.startswith(" "):
-                    file_lines.append(line.strip())
-            if lic_line and lic_line not in SKIP_LIC:
-                lics = set()
-                for part in re.split(r'\s+and/or\s+', lic_line):
-                    part = part.strip("() ")
-                    base = re.split(r'\s+with\s+', part, flags=re.IGNORECASE)[0].strip()
-                    if base:
-                        lics.add(base)
-                for fp in file_lines:
-                    sanity_results[fp] = lics
-    except Exception:
-        pass
+# Load sanity-check results from all available secondary scanners.
+# When scancode is primary, secondaries may include licensecheck and/or decopy.
+# When licensecheck is primary, the secondary is decopy.
+all_sanity_results = {}  # tool_name → {path: set(licenses)}
 
-def run_sanity_check():
-    """Cross-validate scancode results against licensecheck findings.
-    Returns list of (path, scancode_lics, licensecheck_lics) tuples where
-    the tools disagree on the detected license family."""
+def _parse_dep5_sanity(content):
+    """Parse DEP-5 style output into {path: set(licenses)} for cross-validation."""
+    results = {}
+    SKIP_LIC = {"UNKNOWN"}
+    for para in content.split("\n\n"):
+        para = para.strip()
+        if not para.startswith("Files:"):
+            continue
+        lines = para.split("\n")
+        file_lines = []
+        lic_line = None
+        in_files = True
+        for line in lines:
+            if line.startswith("Files:"):
+                rest = line[6:].strip()
+                if rest:
+                    file_lines.append(rest)
+                in_files = True
+            elif line.startswith("Copyright:"):
+                in_files = False
+            elif line.startswith("License:"):
+                in_files = False
+                lic_line = line[8:].strip()
+            elif in_files and line.startswith(" "):
+                file_lines.append(line.strip())
+        if lic_line and lic_line not in SKIP_LIC:
+            lics = set()
+            for part in re.split(r'\s+and/or\s+', lic_line):
+                part = part.strip("() ")
+                base = re.split(r'\s+with\s+', part, flags=re.IGNORECASE)[0].strip()
+                if base:
+                    lics.add(base)
+            for fp in file_lines:
+                results[fp] = lics
+    return results
+
+if has_sanity_check:
+    _sanity_files = {
+        "licensecheck": "licensecheck_sanity.txt",
+        "decopy": "decopy.txt",
+    }
+    for _st in sanity_tools:
+        _sf = os.path.join(os.path.dirname(scan_file), _sanity_files.get(_st, ""))
+        if os.path.isfile(_sf):
+            try:
+                with open(_sf, encoding="utf-8") as f:
+                    all_sanity_results[_st] = _parse_dep5_sanity(f.read())
+            except Exception:
+                pass
+
+def run_sanity_check(tool_name, sanity_results):
+    """Cross-validate primary scanner results against a secondary scanner.
+    Returns list of (path, primary_dep5, secondary_dep5) tuples where
+    the tools disagree on the detected license family.
+    All identifiers are DEP-5-normalized for display."""
     if not sanity_results:
         return []
 
-    # Build lookup from primary scan results
+    # Build lookup from primary scan results (DEP-5 normalised)
     primary = {}
     for r in scan_results:
         fp = r["path"]
-        primary[fp] = set(r["licenses"])
+        primary[fp] = set(to_dep5(l) for l in r["licenses"] if l)
 
     discrepancies = []
     for fp, lc_lics in sanity_results.items():
         # Normalize path
         norm = "./" + fp.lstrip("./")
+        # Skip project-level license/copying/authors files — they
+        # describe the project as a whole and routinely differ between
+        # scanners without indicating a real problem.
+        _bn = os.path.basename(norm).lower()
+        if _bn in _LICENSE_FILE_NAMES or _bn in ("authors", "authors.txt",
+                                                   "contributors",
+                                                   "contributors.txt"):
+            continue
         sc_lics = primary.get(norm, set())
-        if not sc_lics and not lc_lics:
+        lc_dep5 = set(to_dep5(l) for l in lc_lics if l)
+        if not sc_lics and not lc_dep5:
             continue
         # Normalize for comparison: strip versions, lowercase
         def _family(lic):
             s = re.sub(r'[- ]\d[\d.]*\+?$', '', lic).strip()
             return s.lower().replace("-", "").replace("_", "").replace(" ", "")
         sc_families = {_family(l) for l in sc_lics if l}
-        lc_families = {_family(l) for l in lc_lics if l}
+        lc_families = {_family(l) for l in lc_dep5 if l}
         # Skip if either found nothing (one tool may not detect headers)
         if not sc_families or not lc_families:
             continue
@@ -2828,11 +3266,64 @@ def run_sanity_check():
             discrepancies.append((
                 norm,
                 ", ".join(sorted(sc_lics)) or "(none)",
-                ", ".join(sorted(lc_lics)) or "(none)",
+                ", ".join(sorted(lc_dep5)) or "(none)",
             ))
     return discrepancies
 
-sanity_discrepancies = run_sanity_check()
+all_sanity_discrepancies = {}  # tool_name → [(path, primary_lics, secondary_lics)]
+for _st, _sr in all_sanity_results.items():
+    all_sanity_discrepancies[_st] = run_sanity_check(_st, _sr)
+
+# ── Two-of-three consensus ───────────────────────────────────────────
+# When all three scanners ran, compute consensus: for each file flagged
+# by any pairwise comparison, check if two of three agree.  That file
+# is downgraded from a warning to informational.
+sanity_consensus = []   # [(path, {tool: lics, ...}, consensus_lic_or_None)]
+sanity_real_disc = []   # files where all three disagree
+
+if len(all_sanity_results) >= 2:
+    # Gather every path that ANY secondary flagged
+    _flagged_paths = set()
+    for _sd in all_sanity_discrepancies.values():
+        for fp, _, _ in _sd:
+            _flagged_paths.add(fp)
+
+    if _flagged_paths:
+        # Build per-tool DEP-5 license sets for every flagged path
+        _primary_lics = {}
+        for r in scan_results:
+            if r["path"] in _flagged_paths:
+                _primary_lics[r["path"]] = set(to_dep5(l) for l in r["licenses"] if l)
+
+        def _family(lic):
+            s = re.sub(r'[- ]\d[\d.]*\+?$', '', lic).strip()
+            return s.lower().replace("-", "").replace("_", "").replace(" ", "")
+
+        for fp in sorted(_flagged_paths):
+            tool_lics = {scanner: _primary_lics.get(fp, set())}
+            for _st, _sr in all_sanity_results.items():
+                raw = _sr.get(fp.lstrip("./"), _sr.get(fp, set()))
+                tool_lics[_st] = set(to_dep5(l) for l in raw if l) if raw else set()
+
+            # Compare families pairwise to find which tools agree
+            tools = list(tool_lics.keys())
+            _agreements = []
+            for i in range(len(tools)):
+                for j in range(i + 1, len(tools)):
+                    fi = {_family(l) for l in tool_lics[tools[i]] if l}
+                    fj = {_family(l) for l in tool_lics[tools[j]] if l}
+                    if fi and fj and (fi & fj):
+                        _agreements.append((tools[i], tools[j]))
+
+            if _agreements:
+                # At least two tools agree — pick the consensus license
+                _winner_pair = _agreements[0]
+                _consensus = ", ".join(sorted(
+                    tool_lics[_winner_pair[0]] & tool_lics[_winner_pair[1]]
+                )) or ", ".join(sorted(tool_lics[_winner_pair[0]]))
+                sanity_consensus.append((fp, tool_lics, _consensus))
+            else:
+                sanity_real_disc.append((fp, tool_lics))
 
 real_mismatches = defaultdict(list)
 fp_mismatches = defaultdict(list)
@@ -2907,6 +3398,14 @@ if mode == "review":
     # Test 3: Mismatches
     status = "PASS" if real_count == 0 else "WARN" if real_count < 10 else "FAIL"
     print(f"[{status}] License mismatches: {real_count}")
+    if real_mismatches:
+        for (det, decl), files in sorted(real_mismatches.items()):
+            print(f"        Detected '{det}' but declared '{decl}' ({len(files)} file(s))")
+            _lim = len(files) if verbose else 3
+            for fp in files[:_lim]:
+                print(f"          {fp}")
+            if len(files) > _lim:
+                print(f"          ... and {len(files) - _lim} more")
 
     # Test 4: Missing licenses
     declared_lics = set(lic for _, lic in stanzas)
@@ -2980,19 +3479,21 @@ if mode == "review":
         "INFO" if len(src_uncovered) < 5 else "WARN")
     print(f"[{status}] Source files not matched by any stanza: {len(src_uncovered)}")
     if src_uncovered:
-        for fp, lics in src_uncovered[:5]:
+        _lim = len(src_uncovered) if verbose else 5
+        for fp, lics in src_uncovered[:_lim]:
             lic_str = ", ".join(lics) if lics else "(unknown)"
             print(f"        {fp}  [{lic_str}]")
-        if len(src_uncovered) > 5:
-            print(f"        ... and {len(src_uncovered) - 5} more")
+        if len(src_uncovered) > _lim:
+            print(f"        ... and {len(src_uncovered) - _lim} more")
 
     # Test 10: Stale stanza globs
     status = "PASS" if not stale else "WARN"
     print(f"[{status}] Stale stanza globs (match no file): {len(stale)}")
-    for glob_pat, lic in stale[:5]:
+    _lim = len(stale) if verbose else 5
+    for glob_pat, lic in stale[:_lim]:
         print(f"        {glob_pat}  ({lic})")
-    if len(stale) > 5:
-        print(f"        ... and {len(stale) - 5} more")
+    if len(stale) > _lim:
+        print(f"        ... and {len(stale) - _lim} more")
 
     print()
     lic_ok = not lic_issues or not errors
@@ -3000,36 +3501,42 @@ if mode == "review":
     dep5_ok = not dep5_errors
 
     # Test 11: Copyright holder accuracy
-    missing_holders, extra_holders, _, _ = check_copyright_holders()
-    cop_total = len(missing_holders) + len(extra_holders)
-    if cop_total == 0:
+    missing_holders, extra_holders, _, holder_file_map = check_copyright_holders()
+    if not missing_holders and not extra_holders:
         print("[PASS] Copyright holders match detected holders")
     else:
-        status = "WARN" if not missing_holders else "WARN"
-        print(f"[{status}] Copyright holder mismatches: "
-              f"{len(missing_holders)} missing, {len(extra_holders)} extra")
-        for glob_pat, holder in missing_holders[:3]:
-            print(f"        + {glob_pat}: {holder}")
-        for glob_pat, holder in extra_holders[:3]:
-            print(f"        - {glob_pat}: {holder}")
-        if cop_total > 6:
-            print(f"        ... and {cop_total - 6} more")
+        if missing_holders:
+            status = "WARN"
+            print(f"[{status}] Undeclared copyright holders: "
+                  f"{len(missing_holders)} detected in source but not in debian/copyright")
+            _lim = len(missing_holders) if verbose else 3
+            for glob_pat, holder in missing_holders[:_lim]:
+                print(f"        + {glob_pat}: {holder}")
+                if verbose:
+                    _src_files = sorted(holder_file_map.get((glob_pat, holder), set()))
+                    for _sf in _src_files[:5]:
+                        print(f"            found in: {_sf}")
+                    if len(_src_files) > 5:
+                        print(f"            ... and {len(_src_files) - 5} more file(s)")
+            if len(missing_holders) > _lim:
+                print(f"        ... and {len(missing_holders) - _lim} more")
+        if extra_holders:
+            print(f"[INFO] Declared holders not found in file headers: "
+                  f"{len(extra_holders)} (normal for files without embedded headers)")
+            _lim = len(extra_holders) if verbose else 3
+            for glob_pat, holder in extra_holders[:_lim]:
+                print(f"        {glob_pat}: {holder}")
+            if len(extra_holders) > _lim:
+                print(f"        ... and {len(extra_holders) - _lim} more")
 
-    # Test 12: Decopy findings
-    if decopy_issues:
-        print(f"[INFO] Decopy findings: {len(decopy_issues)} issue(s)")
-        for line in decopy_issues[:5]:
-            print(f"        {line}")
-        if len(decopy_issues) > 5:
-            print(f"        ... and {len(decopy_issues) - 5} more")
-    
     # Test 13: Low-confidence detections
     if low_confidence:
         print(f"[INFO] Low-confidence license detections skipped: {len(low_confidence)}")
-        for path, lic, score in low_confidence[:5]:
+        _lim = len(low_confidence) if verbose else 5
+        for path, lic, score in low_confidence[:_lim]:
             print(f"        {path}  ({lic}, score={score})")
-        if len(low_confidence) > 5:
-            print(f"        ... and {len(low_confidence) - 5} more")
+        if len(low_confidence) > _lim:
+            print(f"        ... and {len(low_confidence) - _lim} more")
 
     # Test 14: Stanza consolidation opportunities
     consol_groups = check_consolidation()
@@ -3037,13 +3544,14 @@ if mode == "review":
         total_saving = sum(len(g["stanzas"]) - 1 for g in consol_groups)
         print(f"[INFO] Stanza consolidation: {len(consol_groups)} group(s), "
               f"{total_saving} stanza(s) can be merged")
-        for grp in consol_groups[:5]:
+        _lim = len(consol_groups) if verbose else 5
+        for grp in consol_groups[:_lim]:
             n = len(grp["stanzas"])
             f_count = len(grp["merged_files"])
             print(f"        {grp['license']}: {n} stanzas → 1 "
                   f"({f_count} files, {', '.join(grp['merged_cops'][:2])})")
-        if len(consol_groups) > 5:
-            print(f"        ... and {len(consol_groups) - 5} more")
+        if len(consol_groups) > _lim:
+            print(f"        ... and {len(consol_groups) - _lim} more")
     else:
         print("[PASS] No stanza consolidation opportunities")
 
@@ -3060,10 +3568,11 @@ if mode == "review":
             fixme_stanzas.append(first_file)
     if fixme_stanzas:
         print(f"[WARN] FIXME entries needing attention: {len(fixme_stanzas)}")
-        for fs in fixme_stanzas[:5]:
+        _lim = len(fixme_stanzas) if verbose else 5
+        for fs in fixme_stanzas[:_lim]:
             print(f"        Files: {fs} ...")
-        if len(fixme_stanzas) > 5:
-            print(f"        ... and {len(fixme_stanzas) - 5} more")
+        if len(fixme_stanzas) > _lim:
+            print(f"        ... and {len(fixme_stanzas) - _lim} more")
     else:
         print("[PASS] No FIXME entries in copyright file")
 
@@ -3105,10 +3614,11 @@ if mode == "review":
     if override_issues:
         print(f"[WARN] Broad globs overriding specific stanzas: "
               f"{len(override_issues)}")
-        for glob_pat, lic, n in override_issues[:5]:
+        _lim = len(override_issues) if verbose else 5
+        for glob_pat, lic, n in override_issues[:_lim]:
             print(f"        {glob_pat} ({lic}) overrides {n} specific stanza(s)")
-        if len(override_issues) > 5:
-            print(f"        ... and {len(override_issues) - 5} more")
+        if len(override_issues) > _lim:
+            print(f"        ... and {len(override_issues) - _lim} more")
     else:
         print("[PASS] No broad-glob override conflicts")
 
@@ -3124,36 +3634,58 @@ if mode == "review":
                  if len(occs) > 1}
     if dup_files:
         print(f"[WARN] Files declared in multiple stanzas: {len(dup_files)}")
-        for fp in sorted(dup_files)[:5]:
+        _lim = len(dup_files) if verbose else 5
+        for fp in sorted(dup_files)[:_lim]:
             lics = [lic for _, lic in dup_files[fp]]
             print(f"        {fp}  ({' → '.join(lics)})")
-        if len(dup_files) > 5:
-            print(f"        ... and {len(dup_files) - 5} more")
+        if len(dup_files) > _lim:
+            print(f"        ... and {len(dup_files) - _lim} more")
     else:
         print("[PASS] No duplicate file declarations")
 
-    # Test 19: Sanity check — cross-validate scancode vs licensecheck
+    # Test 19: Sanity check — cross-validate scanners
     if has_sanity_check:
-        if sanity_discrepancies:
-            print(f"[WARN] Scanner cross-validation discrepancies: "
-                  f"{len(sanity_discrepancies)} file(s)")
-            for fp, sc_l, lc_l in sanity_discrepancies[:5]:
+        if sanity_real_disc:
+            # Files where all scanners disagree
+            print(f"[WARN] Scanner cross-validation: "
+                  f"{len(sanity_real_disc)} file(s) where all scanners disagree")
+            _lim = len(sanity_real_disc) if verbose else 5
+            for fp, tool_lics in sanity_real_disc[:_lim]:
                 print(f"        {fp}")
-                print(f"          scancode:     {sc_l}")
-                print(f"          licensecheck: {lc_l}")
-            if len(sanity_discrepancies) > 5:
-                print(f"        ... and {len(sanity_discrepancies) - 5} more")
-        else:
-            print("[PASS] Scanner cross-validation: scancode and licensecheck agree")
+                for _t, _l in sorted(tool_lics.items()):
+                    _ls = ", ".join(sorted(_l)) or "(none)"
+                    print(f"          {_t}:{' ' * max(1, 14 - len(_t))}{_ls}")
+            if len(sanity_real_disc) > _lim:
+                print(f"        ... and {len(sanity_real_disc) - _lim} more")
+        if sanity_consensus:
+            # Files where 2-of-3 agree — informational only
+            print(f"[INFO] Scanner cross-validation: "
+                  f"{len(sanity_consensus)} file(s) resolved by 2-of-3 consensus")
+            _lim = len(sanity_consensus) if verbose else 3
+            for fp, tool_lics, consensus in sanity_consensus[:_lim]:
+                print(f"        {fp}  →  {consensus}")
+                for _t, _l in sorted(tool_lics.items()):
+                    _ls = ", ".join(sorted(_l)) or "(none)"
+                    print(f"          {_t}:{' ' * max(1, 14 - len(_t))}{_ls}")
+            if len(sanity_consensus) > _lim:
+                print(f"        ... and {len(sanity_consensus) - _lim} more")
+        if not sanity_real_disc and not sanity_consensus:
+            _tool_names = " and ".join(sanity_tools)
+            print(f"[PASS] Scanner cross-validation: "
+                  f"{scanner}, {_tool_names} agree")
     else:
-        print("[INFO] Scanner cross-validation skipped (licensecheck not available)")
+        print("[INFO] Scanner cross-validation skipped (no secondary scanner available)")
 
     fixme_ok = not fixme_stanzas
     versionless_ok = not versionless
     override_ok = not override_issues
     dup_ok = not dup_files
+    compat_ok = not all_compat
 
-    if (real_count == 0 and not missing_in_copyright and not nonfree_found
+    if not compat_ok:
+        print("VERDICT: BLOCKED — license incompatibility detected. "
+              "Must be resolved before archive acceptance.")
+    elif (real_count == 0 and not missing_in_copyright and not nonfree_found
             and lic_ok and cov_ok and not stale and dep5_ok
             and not missing_holders and fixme_ok and versionless_ok
             and override_ok and dup_ok):
@@ -3171,11 +3703,129 @@ if mode == "review":
         for (det, decl), files in sorted(real_mismatches.items()):
             print(f"\n  Detected: {det}")
             print(f"  Declared: {decl}")
-            for fp in files[:5]:
+            _lim = len(files) if verbose else 5
+            for fp in files[:_lim]:
                 print(f"    -> {fp}")
-            if len(files) > 5:
-                print(f"    ... and {len(files) - 5} more")
+            if len(files) > _lim:
+                print(f"    ... and {len(files) - _lim} more")
         print()
+
+    # ── Export full-detail findings ───────────────────────────────────
+    if export_file:
+        with open(export_file, "w") as ef:
+            ef.write("DEBIAN COPYRIGHT REVIEW — FULL EXPORT\n")
+            ef.write(f"Generated: {datetime.datetime.now().isoformat()}\n")
+            ef.write(f"Source: {os.environ.get('SRCDIR', '.')}\n")
+            ef.write(f"Scanner: {scanner}\n")
+            ef.write(f"Files scanned: {len(scan_results)}\n")
+            ef.write("=" * 78 + "\n\n")
+
+            if real_mismatches:
+                ef.write("LICENSE MISMATCHES\n")
+                ef.write("-" * 78 + "\n")
+                for (det, decl), files in sorted(real_mismatches.items()):
+                    ef.write(f"\nDetected: {det}\n")
+                    ef.write(f"Declared: {decl}\n")
+                    ef.write(f"Files ({len(files)}):\n")
+                    for fp in files:
+                        ef.write(f"  {fp}\n")
+                ef.write("\n")
+
+            if fp_mismatches:
+                ef.write("FALSE POSITIVE MISMATCHES\n")
+                ef.write("-" * 78 + "\n")
+                for cat in sorted(fp_mismatches):
+                    items = fp_mismatches[cat]
+                    ef.write(f"\nCategory: {cat} ({len(items)} file(s))\n")
+                    for fp, det, decl in items:
+                        ef.write(f"  {fp}  ({det} vs {decl})\n")
+                ef.write("\n")
+
+            if missing_in_copyright:
+                ef.write("UNDECLARED LICENSES\n")
+                ef.write("-" * 78 + "\n")
+                for ml in sorted(missing_in_copyright):
+                    ef.write(f"  {ml} (found in {all_scan_licenses[ml]} files)\n")
+                ef.write("\n")
+
+            if nonfree_found:
+                ef.write("NON-FREE LICENSES\n")
+                ef.write("-" * 78 + "\n")
+                for nf in nonfree_found:
+                    ef.write(f"  {nf}\n")
+                ef.write("\n")
+
+            if src_no_lic:
+                ef.write(f"SOURCE FILES WITHOUT LICENSE HEADER ({len(src_no_lic)})\n")
+                ef.write("-" * 78 + "\n")
+                for fp in src_no_lic:
+                    ef.write(f"  {fp}\n")
+                ef.write("\n")
+
+            if lic_issues:
+                ef.write("LICENSE TEXT ISSUES\n")
+                ef.write("-" * 78 + "\n")
+                for lic, sev, msg in lic_issues:
+                    ef.write(f"  [{sev.upper()}] {msg}\n")
+                ef.write("\n")
+
+            if src_uncovered:
+                ef.write(f"UNCOVERED SOURCE FILES ({len(src_uncovered)})\n")
+                ef.write("-" * 78 + "\n")
+                for fp, lics in src_uncovered:
+                    lic_str = ", ".join(lics) if lics else "(unknown)"
+                    ef.write(f"  {fp}  [{lic_str}]\n")
+                ef.write("\n")
+
+            if stale:
+                ef.write(f"STALE STANZA GLOBS ({len(stale)})\n")
+                ef.write("-" * 78 + "\n")
+                for glob_pat, lic in stale:
+                    ef.write(f"  {glob_pat}  ({lic})\n")
+                ef.write("\n")
+
+            if missing_holders or extra_holders:
+                ef.write("COPYRIGHT HOLDER MISMATCHES\n")
+                ef.write("-" * 78 + "\n")
+                for glob_pat, holder in missing_holders:
+                    ef.write(f"  + {glob_pat}: {holder}\n")
+                for glob_pat, holder in extra_holders:
+                    ef.write(f"  - {glob_pat}: {holder}\n")
+                ef.write("\n")
+
+            if decopy_issues:
+                ef.write(f"DECOPY FINDINGS ({len(decopy_issues)})\n")
+                ef.write("-" * 78 + "\n")
+                for line in decopy_issues:
+                    ef.write(f"  {line}\n")
+                ef.write("\n")
+
+            if low_confidence:
+                ef.write(f"LOW-CONFIDENCE DETECTIONS ({len(low_confidence)})\n")
+                ef.write("-" * 78 + "\n")
+                for path, lic, score in low_confidence:
+                    ef.write(f"  {path}  ({lic}, score={score})\n")
+                ef.write("\n")
+
+            if has_sanity_check:
+                if sanity_real_disc:
+                    ef.write(f"SCANNER CROSS-VALIDATION — ALL DISAGREE ({len(sanity_real_disc)})\n")
+                    ef.write("-" * 78 + "\n")
+                    for fp, tool_lics in sanity_real_disc:
+                        ef.write(f"  {fp}\n")
+                        for _t, _l in sorted(tool_lics.items()):
+                            ef.write(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}\n")
+                    ef.write("\n")
+                if sanity_consensus:
+                    ef.write(f"SCANNER CROSS-VALIDATION — 2-OF-3 CONSENSUS ({len(sanity_consensus)})\n")
+                    ef.write("-" * 78 + "\n")
+                    for fp, tool_lics, consensus in sanity_consensus:
+                        ef.write(f"  {fp}  →  {consensus}\n")
+                        for _t, _l in sorted(tool_lics.items()):
+                            ef.write(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}\n")
+                    ef.write("\n")
+
+        print(f"Full findings exported to: {export_file}")
 
 else:
     # ── Standard check report ─────────────────────────────────────────
@@ -3485,19 +4135,26 @@ else:
     if has_sanity_check:
         print("=" * W)
         print("SECTION 11: SCANNER CROSS-VALIDATION (sanity check)")
-        print("scancode vs licensecheck — files where tools disagree on license")
+        _all_tools = [scanner] + sanity_tools
+        print(f"{' vs '.join(_all_tools)} — files where tools disagree on license")
         print("=" * W)
-        if sanity_discrepancies:
-            print(f"\n{len(sanity_discrepancies)} file(s) where scancode and "
-                  f"licensecheck disagree:\n")
-            for fp, sc_l, lc_l in sanity_discrepancies:
+        if sanity_real_disc:
+            print(f"\n{len(sanity_real_disc)} file(s) where ALL scanners disagree:\n")
+            for fp, tool_lics in sanity_real_disc:
                 print(f"  {fp}")
-                print(f"    scancode:     {sc_l}")
-                print(f"    licensecheck: {lc_l}")
+                for _t, _l in sorted(tool_lics.items()):
+                    print(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}")
             print()
             print("  These files may warrant manual inspection.")
-        else:
-            print("\nNo discrepancies — both scanners agree on all files.")
+        if sanity_consensus:
+            print(f"\n{len(sanity_consensus)} file(s) resolved by 2-of-3 consensus:\n")
+            for fp, tool_lics, consensus in sanity_consensus:
+                print(f"  {fp}  →  {consensus}")
+                for _t, _l in sorted(tool_lics.items()):
+                    print(f"    {_t}: {', '.join(sorted(_l)) or '(none)'}")
+            print()
+        if not sanity_real_disc and not sanity_consensus:
+            print(f"\nNo discrepancies — all scanners agree on all files.")
         print()
 
     # Low-confidence detections (scancode only)
@@ -3534,7 +4191,10 @@ else:
     if consol_groups:
         print(f"  Stanzas consolidatable:                {consol_saving} (in {len(consol_groups)} group(s))")
     if has_sanity_check:
-        print(f"  Scanner cross-validation discrepancies: {len(sanity_discrepancies)}")
+        if sanity_real_disc:
+            print(f"  Scanner cross-validation (all disagree): {len(sanity_real_disc)}")
+        if sanity_consensus:
+            print(f"  Scanner cross-validation (2-of-3 ok):  {len(sanity_consensus)}")
 
     total_issues = real_count + len(src_uncovered) + len(stale) + len(dep5_errors)
     if total_issues == 0:
@@ -3698,6 +4358,193 @@ else:
             else:
                 print("  ✗ Skipped.\n")
 
+        # ── Fix 0b: Populate header stubs ────────────────────────────
+        # Decopy leaves Source: TODO and may omit Upstream-Name/Contact.
+        # Try to infer from the source tree (debian/control, setup.py,
+        # pyproject.toml, package.json, etc.).
+        _hdr_paras = working_text.split("\n\n")
+        if _hdr_paras:
+            _hdr = _hdr_paras[0]
+            _hdr_changed = False
+
+            # Infer upstream name from debian/control or directory name
+            _upstream_name = ""
+            _upstream_contact = ""
+            _upstream_source = ""
+
+            for _ctrl_path in ("debian/control",):
+                if os.path.isfile(_ctrl_path):
+                    with open(_ctrl_path, encoding="utf-8",
+                              errors="replace") as _cf:
+                        for _cl in _cf:
+                            _cl = _cl.rstrip("\n")
+                            if _cl.startswith("Source:"):
+                                _upstream_name = _upstream_name or \
+                                    _cl[7:].strip()
+                            if _cl.startswith("Homepage:"):
+                                _upstream_source = _upstream_source or \
+                                    _cl[9:].strip()
+                            if _cl.startswith("Maintainer:"):
+                                _upstream_contact = _upstream_contact or \
+                                    _cl[11:].strip()
+
+            # Fallback: directory name
+            if not _upstream_name:
+                _upstream_name = os.path.basename(
+                    os.environ.get("SRCDIR", "."))
+
+            # Fill in Source: TODO
+            if re.search(r'^Source:\s*TODO\s*$', _hdr, re.MULTILINE):
+                if _upstream_source:
+                    _hdr = re.sub(r'^Source:\s*TODO\s*$',
+                                  f'Source: {_upstream_source}',
+                                  _hdr, flags=re.MULTILINE)
+                    _hdr_changed = True
+                    print(f"  Filled Source: {_upstream_source}")
+
+            # Add missing Upstream-Name
+            if "Upstream-Name:" not in _hdr and _upstream_name:
+                _hdr = re.sub(
+                    r'^(Format:[^\n]*)',
+                    rf'\1\nUpstream-Name: {_upstream_name}',
+                    _hdr, count=1)
+                _hdr_changed = True
+                print(f"  Added Upstream-Name: {_upstream_name}")
+
+            # Add missing Upstream-Contact
+            if "Upstream-Contact:" not in _hdr and _upstream_contact:
+                if "Upstream-Name:" in _hdr:
+                    _hdr = re.sub(
+                        r'^(Upstream-Name:[^\n]*)',
+                        rf'\1\nUpstream-Contact: {_upstream_contact}',
+                        _hdr, count=1)
+                else:
+                    _hdr = re.sub(
+                        r'^(Format:[^\n]*)',
+                        rf'\1\nUpstream-Contact: {_upstream_contact}',
+                        _hdr, count=1)
+                _hdr_changed = True
+                print(f"  Added Upstream-Contact: {_upstream_contact}")
+
+            if _hdr_changed:
+                _hdr_paras[0] = _hdr
+                working_text = "\n\n".join(_hdr_paras)
+                changes_made += 1
+                print()
+
+        # ── Fix 0c: Remove FSF boilerplate copyright holders ─────────
+        # Scanners (and decopy) attribute "Free Software Foundation" as a
+        # copyright holder on GPL-family files because the FSF holds the
+        # copyright on the GPL *text itself*, not on the project code.
+        # Strip these false attributions from Files stanzas whose license
+        # is GPL/LGPL/AGPL/GFDL.
+        _fsf_re = re.compile(r'free\s+software\s+foundation', re.IGNORECASE)
+        _gpl_lic_re = re.compile(r'\b(GPL|LGPL|AGPL|GFDL)\b', re.IGNORECASE)
+        _0c_paras = working_text.split("\n\n")
+        _0c_count = 0
+        for _pi, _para in enumerate(_0c_paras):
+            # Only touch Files stanzas (not header, not standalone License blocks)
+            if not re.match(r'^\s*Files:', _para):
+                continue
+            # Check if the stanza's license is GPL-family
+            _lic_m = re.search(r'^License:\s*(.+)', _para, re.MULTILINE)
+            if not _lic_m or not _gpl_lic_re.search(_lic_m.group(1)):
+                continue
+            # Find and filter Copyright lines
+            lines = _para.split("\n")
+            # Collect all copyright holder values from this stanza
+            cop_values = []
+            cop_start = None  # index of first copyright line
+            cop_end = None    # index after last copyright line
+            in_copyright = False
+            for li, line in enumerate(lines):
+                if line.startswith("Copyright:"):
+                    in_copyright = True
+                    if cop_start is None:
+                        cop_start = li
+                    val = line[10:].strip()
+                    if val:
+                        cop_values.append(val)
+                    cop_end = li + 1
+                elif in_copyright and line.startswith("           "):
+                    val = line.strip()
+                    if val:
+                        cop_values.append(val)
+                    cop_end = li + 1
+                else:
+                    in_copyright = False
+            if cop_start is None:
+                continue
+            # Filter out FSF boilerplate holders
+            filtered = [v for v in cop_values if not _fsf_re.search(v)]
+            if len(filtered) == len(cop_values):
+                continue  # nothing to remove
+            if not filtered:
+                continue  # don't remove ALL holders
+            # Rebuild copyright block
+            cop_lines = [f"Copyright: {filtered[0]}"]
+            for fv in filtered[1:]:
+                cop_lines.append(f"           {fv}")
+            new_lines = lines[:cop_start] + cop_lines + lines[cop_end:]
+            _0c_paras[_pi] = "\n".join(new_lines)
+            _0c_count += 1
+        if _0c_count:
+            working_text = "\n\n".join(_0c_paras)
+            changes_made += 1
+            print(f"  Removed FSF boilerplate copyright from "
+                  f"{_0c_count} GPL-family stanza(s).\n")
+
+        # ── Fix 0d: Remove license text files from Files stanzas ─────
+        # Whole license text files (e.g. LICENSES/*.txt, COPYING, etc.)
+        # are covered by the Files: * catch-all and should not appear in
+        # per-file stanzas.  Decopy sometimes groups them with source
+        # files that share the same license.
+        _0d_paras = working_text.split("\n\n")
+        _0d_count = 0
+        for _pi, _para in enumerate(_0d_paras):
+            if not re.match(r'^\s*Files:', _para):
+                continue
+            lines = _para.split("\n")
+            # Collect Files: paths
+            file_paths = []
+            files_end = 0
+            for li, line in enumerate(lines):
+                if line.startswith("Files:"):
+                    rest = line[6:].strip()
+                    if rest:
+                        for p in rest.split():
+                            file_paths.append(p)
+                    files_end = li + 1
+                elif files_end and line.startswith("       "):
+                    for p in line.strip().split():
+                        file_paths.append(p)
+                    files_end = li + 1
+                else:
+                    break
+            if not file_paths:
+                continue
+            # Filter out license text files
+            kept = [p for p in file_paths if not is_metadata_file(p)]
+            if len(kept) == len(file_paths):
+                continue
+            if not kept:
+                # All paths were license files — remove entire stanza
+                _0d_paras[_pi] = ""
+                _0d_count += 1
+                continue
+            # Rebuild Files: field
+            new_files = [f"Files: {kept[0]}"]
+            for kp in kept[1:]:
+                new_files.append(f"       {kp}")
+            new_lines = new_files + lines[files_end:]
+            _0d_paras[_pi] = "\n".join(new_lines)
+            _0d_count += 1
+        if _0d_count:
+            working_text = "\n\n".join(p for p in _0d_paras if p.strip())
+            changes_made += 1
+            print(f"  Removed license text file(s) from "
+                  f"{_0d_count} stanza(s) (covered by Files: *).\n")
+
         # ── Fix 1: Add stanzas for mismatched files ──────────────────
         if real_mismatches:
             # Group mismatched files by detected license, skipping
@@ -3749,6 +4596,13 @@ else:
                     for r in scan_results:
                         if r["path"] in fps or r["path"].lstrip("./") in fps:
                             file_cops = [c for c in r.get("copyrights", []) if c]
+                            # Filter FSF boilerplate from GPL-family files
+                            _fl = " ".join(r.get("licenses", [])).lower()
+                            if re.search(r'\b(gpl|lgpl|agpl|gfdl|gnu)\b', _fl):
+                                file_cops = [
+                                    c for c in file_cops
+                                    if not re.search(r'free\s+software\s+foundation',
+                                                     c, re.IGNORECASE)]
                             break
                     ak = frozenset(_holder_key(c) for c in file_cops)
                     key = (det_lic, ak)
@@ -3829,6 +4683,124 @@ else:
                     print(f"  ✓ Added (edited).\n")
                 else:
                     print(f"  ✗ Skipped.\n")
+
+        # ── Fix 1b: Resolve 'Unknown' license stanzas ───────────────
+        # Decopy sometimes assigns 'Unknown' when it cannot determine
+        # the license.  Use scanner results to resolve where possible.
+        unknown_paras = []
+        new_paras_1b = []
+        para_idx = -1
+        for para in working_text.split("\n\n"):
+            para_idx += 1
+            plines = para.strip().split("\n")
+            has_files = any(l.strip().startswith("Files:") for l in plines)
+            lic_line = None
+            for l in plines:
+                if l.startswith("License:"):
+                    lic_line = l
+                    break
+            if (has_files and lic_line
+                    and lic_line[8:].strip().split()[0].lower() == "unknown"):
+                # Collect the file globs from this stanza
+                globs = []
+                for l in plines:
+                    if l.startswith("Files:"):
+                        globs.extend(l[6:].split())
+                    elif l.startswith(" ") and not any(
+                            l.strip().startswith(f)
+                            for f in ("Copyright:", "License:", "Comment:")):
+                        globs.extend(l.split())
+                unknown_paras.append((para_idx, para, globs))
+            new_paras_1b.append(para)
+
+        if unknown_paras:
+            fix1b_count = 0
+            # Build a map from file path → detected licenses from scanner
+            _file_det = {}
+            for r in scan_results:
+                fp = r["path"].lstrip("./")
+                lics = [l for l in r.get("licenses", [])
+                        if l.upper() not in ("UNKNOWN",)]
+                if lics:
+                    _file_det[fp] = lics
+
+            for pidx, para, globs in unknown_paras:
+                # Find files matching these globs
+                matched_lics = defaultdict(int)
+                for fp in _file_det:
+                    for g in globs:
+                        if fnmatch.fnmatch(fp, g) or g == "*":
+                            for l in _file_det[fp]:
+                                dep5 = to_dep5(l)
+                                matched_lics[dep5] += 1
+                            break
+                if matched_lics:
+                    # Pick the dominant license
+                    best_lic = max(matched_lics, key=matched_lics.get)
+                    print(f"  Unknown license stanza ({', '.join(globs[:3])}"
+                          f"{'...' if len(globs) > 3 else ''}) → "
+                          f"scanner detected: {best_lic}")
+                    answer = ask(f"  Replace Unknown with {best_lic}? "
+                                 f"[y/N/A/X] ", batch=True).strip().lower()
+                    if answer in ("y", "yes"):
+                        new_para = re.sub(
+                            r'^(License:)\s+Unknown',
+                            rf'\1 {best_lic}',
+                            new_paras_1b[pidx],
+                            flags=re.MULTILINE)
+                        new_paras_1b[pidx] = new_para
+                        fix1b_count += 1
+                        print(f"  ✓ Replaced.\n")
+                    else:
+                        print(f"  ✗ Skipped.\n")
+                else:
+                    # No scanner data.  If a catch-all * stanza exists,
+                    # these non-source files are already covered by it —
+                    # remove the redundant Unknown stanza so they
+                    # inherit the project's main license.
+                    has_catchall = any(
+                        g == "*" for g, _ in stanzas)
+                    if has_catchall:
+                        print(f"  Unknown license stanza ({', '.join(globs[:3])}"
+                              f"{'...' if len(globs) > 3 else ''}) → "
+                              f"no scanner data; covered by Files: *")
+                        answer = ask(
+                            f"  Remove stanza (files inherit from *)? "
+                            f"[y/N/A/X] ", batch=True).strip().lower()
+                        if answer in ("y", "yes"):
+                            new_paras_1b[pidx] = ""  # mark for removal
+                            fix1b_count += 1
+                            print(f"  ✓ Removed.\n")
+                        else:
+                            print(f"  ✗ Skipped.\n")
+                    else:
+                        print(f"  Unknown license stanza "
+                              f"({', '.join(globs[:3])}"
+                              f"{'...' if len(globs) > 3 else ''}) → "
+                              f"no scanner data; leaving as Unknown.")
+
+            if fix1b_count:
+                working_text = "\n\n".join(
+                    p for p in new_paras_1b if p.strip())
+                changes_made += 1
+                # Also remove any standalone License: Unknown block
+                # that is no longer needed
+                _unknown_used = False
+                for _p in working_text.split("\n\n"):
+                    _pl = _p.strip().split("\n")
+                    _hf = any(l.strip().startswith("Files:") for l in _pl)
+                    if _hf:
+                        for _l in _pl:
+                            if (_l.startswith("License:")
+                                    and _l[8:].strip().split()[0].lower()
+                                    == "unknown"):
+                                _unknown_used = True
+                                break
+                if not _unknown_used:
+                    # Remove standalone License: Unknown block
+                    working_text = re.sub(
+                        r'\n\nLicense: Unknown\n(?:[^\n]*\n)*?(?=\n|$)',
+                        '', working_text)
 
         # ── Fix 2: Remove stale globs ────────────────────────────────
         if stale:
@@ -3913,9 +4885,8 @@ else:
             for lic in sorted(missing_blocks):
                 slug = lic.rstrip("+")
                 if slug in SYSTEM_COMMON_LICENSES or lic in COMMON_LICENSES:
-                    block = (f"\nLicense: {lic}\n"
-                             f" On Debian systems, the full text of this license can be found in\n"
-                             f" `/usr/share/common-licenses/{slug}'.\n")
+                    body = _dep5_common_license_body(lic)
+                    block = f"\nLicense: {lic}\n{body}\n"
                     print(f"  {lic} → will reference /usr/share/common-licenses/{slug}")
                 else:
                     # Try fetching full text
@@ -3936,6 +4907,71 @@ else:
                     print(f"  ✓ Added.\n")
                 else:
                     print(f"  ✗ Skipped.\n")
+
+        # ── Fix 3b: Fix empty/stub standalone license blocks ─────────
+        # Decopy (and manual edits) may leave standalone License blocks
+        # with placeholder text like "Add the corresponding license text
+        # here" or a Comment: stub.  Replace them with proper content.
+        fix3b_count = 0
+        new_paras = []
+        for para in working_text.split("\n\n"):
+            plines = para.strip().split("\n")
+            if not plines:
+                new_paras.append(para)
+                continue
+            first = plines[0]
+            has_files = any(l.strip().startswith("Files:") for l in plines)
+            if not (first.startswith("License:") and not has_files):
+                new_paras.append(para)
+                continue
+            lic_name = first[8:].strip().split()[0] if first[8:].strip() else None
+            if not lic_name:
+                new_paras.append(para)
+                continue
+            # Gather body text (continuation lines + Comment: lines)
+            body = "\n".join(plines[1:]).strip()
+            body_text = re.sub(r'(?m)^Comment:.*', '', body).strip()
+            body_text = re.sub(r'(?m)^ ', '', body_text).strip()
+            # Skip if already has a valid common-licenses reference
+            if '/usr/share/common-licenses/' in body:
+                new_paras.append(para)
+                continue
+            # Only fix if body is empty or a stub placeholder
+            is_stub = (len(body_text) < 80
+                       or re.search(r'FIXME|TODO|add the .* license text|'
+                                    r'add the .* text here|corresponding license',
+                                    body, re.IGNORECASE))
+            if not is_stub:
+                new_paras.append(para)
+                continue
+
+            slug = lic_name.rstrip("+")
+            if slug in SYSTEM_COMMON_LICENSES or lic_name in COMMON_LICENSES:
+                body = _dep5_common_license_body(lic_name)
+                replacement = f"License: {lic_name}\n{body}"
+                print(f"  Fixing empty '{lic_name}' block → "
+                      f"/usr/share/common-licenses/{slug}")
+                new_paras.append(replacement)
+                fix3b_count += 1
+            elif not no_fetch:
+                fetched = fetch_license_text(lic_name)
+                if fetched:
+                    body_fmt = format_license_body(fetched)
+                    replacement = f"License: {lic_name}\n{body_fmt}"
+                    print(f"  Fixing empty '{lic_name}' block → "
+                          f"fetched from SPDX/CC")
+                    new_paras.append(replacement)
+                    fix3b_count += 1
+                else:
+                    new_paras.append(para)
+            else:
+                new_paras.append(para)
+
+        if fix3b_count:
+            working_text = "\n\n".join(new_paras)
+            changes_made += 1
+            print(f"Replaced {fix3b_count} empty/stub license block(s) "
+                  f"with proper content.\n")
 
         # ── Fix 4: Update copyright holders ──────────────────────────
         # Re-parse stanzas from working_text so holder checking reflects
@@ -4235,8 +5271,11 @@ else:
 
         # ── Fix 5: Propose debian/* stanza if missing ────────────────
         # Not applicable for native packages (3.0 (native)).
-        has_debian_glob = any(g in ("debian/*", "debian/**")
-                             for g, _ in stanzas)
+        # Re-check working_text (not the stale 'stanzas' list) because
+        # earlier fixes may have removed a debian/* stanza with Unknown.
+        has_debian_glob = bool(
+            re.search(r'^Files:[^\n]*\bdebian/\*', working_text, re.MULTILINE)
+        )
 
         # Build packager copyright string from detected identity
         packager_cop = ""
@@ -4285,9 +5324,25 @@ else:
                 print(f"  ✗ Skipped.\n")
         elif packager_cop:
             # debian/* stanza exists — check if packager is listed
-            deb_glob = next(g for g, _ in stanzas
-                            if g in ("debian/*", "debian/**"))
-            existing_cops = stanza_copyrights.get(deb_glob, [])
+            _deb_m = re.search(r'^Files:[^\n]*\b(debian/\*\*?)', working_text, re.MULTILINE)
+            deb_glob = _deb_m.group(1) if _deb_m else "debian/*"
+            # Extract copyright lines from working_text for the debian/* stanza
+            existing_cops = []
+            _deb_files_pat = r'(Files:[^\n]*(?:\n +[^\n]+)*)'
+            _deb_escaped = re.escape(deb_glob)
+            for _dfm in re.finditer(_deb_files_pat, working_text):
+                if re.search(r'(?:^Files:\s*|(?<=\n)\s+)' + _deb_escaped + r'\s*$',
+                             _dfm.group(0), re.MULTILINE):
+                    _drest = working_text[_dfm.end():]
+                    _dcop_m = re.match(r'\nCopyright:([^\n]*(?:\n +[^\n]+)*)', _drest)
+                    if _dcop_m:
+                        for _dcl in _dcop_m.group(0).split('\n'):
+                            _dcl = _dcl.strip()
+                            if _dcl.startswith("Copyright:"):
+                                _dcl = _dcl[len("Copyright:"):].strip()
+                            if _dcl:
+                                existing_cops.append(_dcl)
+                    break
             norm_packager = norm_copyright(packager_cop)
             if norm_packager:
                 packager_found = any(
@@ -4329,11 +5384,61 @@ else:
                                 changes_made += 1
                                 found = True
                                 print(f"  ✓ Added to debian/* stanza.\n")
+                            else:
+                                # Stanza has no Copyright: field — insert one
+                                old = fm.group(0)
+                                lic_m = re.match(r'(\nLicense:[^\n]*)', rest)
+                                if lic_m:
+                                    old = old + lic_m.group(0)
+                                    new = fm.group(0) + f"\nCopyright: {packager_cop}" + lic_m.group(0)
+                                else:
+                                    new = old + f"\nCopyright: {packager_cop}"
+                                working_text = working_text.replace(old, new, 1)
+                                changes_made += 1
+                                found = True
+                                print(f"  ✓ Added Copyright to debian/* stanza.\n")
                             break
                     if not found:
                         print(f"  ✗ Could not locate stanza (edit manually).\n")
                 else:
                     print(f"  ✗ Skipped.\n")
+            elif packager_year:
+                # Packager is listed — check if current year is present
+                cur_yr = int(packager_year)
+                matched_line = None
+                for ec in existing_cops:
+                    nc = norm_copyright(ec)
+                    if nc and (norm_packager in nc or nc in norm_packager):
+                        matched_line = ec
+                        break
+                if matched_line:
+                    years, author = _parse_copyright(matched_line)
+                    if cur_yr not in years:
+                        # Build updated line with the current year added
+                        years.add(cur_yr)
+                        syrs = sorted(years)
+                        parts = []
+                        start = prev = syrs[0]
+                        for y in syrs[1:]:
+                            if y == prev + 1:
+                                prev = y
+                            else:
+                                parts.append(f"{start}-{prev}" if prev > start else str(start))
+                                start = prev = y
+                        parts.append(f"{start}-{prev}" if prev > start else str(start))
+                        new_years = ", ".join(parts)
+                        updated_line = f"{new_years} {author}"
+
+                        print(f"Current year ({packager_year}) not in debian/* packager copyright:")
+                        print(f"    {matched_line}")
+                        print(f"  → {updated_line}\n")
+                        answer = ask("  Update year? [Y/n/A/X] ", batch=True).strip().lower()
+                        if answer not in ("n", "no"):
+                            working_text = working_text.replace(matched_line, updated_line, 1)
+                            changes_made += 1
+                            print(f"  ✓ Year updated.\n")
+                        else:
+                            print(f"  ✗ Skipped.\n")
 
         # ── Fix 6: Consolidate stanzas ───────────────────────────────
         # Re-check for consolidation opportunities against working_text
@@ -4563,11 +5668,8 @@ else:
                         has_block = True
                         break
                 if not has_block:
-                    slug = lic.rstrip("+")
-                    block = (f"\nLicense: {lic}\n"
-                             f" On Debian systems, the full text of"
-                             f" this license can be found in\n"
-                             f" `/usr/share/common-licenses/{slug}'.\n")
+                    body = _dep5_common_license_body(lic)
+                    block = f"\nLicense: {lic}\n{body}\n"
                     working_text = working_text.rstrip("\n") + "\n" + block
             print(f"Replaced inline license text with common-licenses"
                   f" reference in {fix8_count} stanza(s).\n")
@@ -4582,14 +5684,16 @@ else:
             print(f"\n{changes_made} fix(es) ready to apply.")
             answer = ask(f"Write changes to {copyright_file}? [y/N] ").strip().lower()
             if answer in ("y", "yes"):
-                # Write backup
-                backup = copyright_file + ".bak"
-                with open(backup, "w", encoding="utf-8") as f:
-                    f.write(original_text)
+                if not _decopy_generated:
+                    # Write backup (skip in generate mode — file was just created)
+                    backup = copyright_file + ".bak"
+                    with open(backup, "w", encoding="utf-8") as f:
+                        f.write(original_text)
                 with open(copyright_file, "w", encoding="utf-8") as f:
                     f.write(working_text)
                 print(f"\n  ✓ Written to {copyright_file}")
-                print(f"  ✓ Backup saved to {backup}")
+                if not _decopy_generated:
+                    print(f"  ✓ Backup saved to {backup}")
                 _warn_stubs(working_text, copyright_file)
             else:
                 # Offer to write to a different file
@@ -4605,19 +5709,12 @@ else:
             print("No fixes applied.")
         print()
 
-    # ── Decopy-generated: output the hardened file to stdout ──────────
+    # ── Decopy-generated: report where the hardened file was written ───
     if _decopy_generated:
-        final_text = ""
-        if os.path.isfile(copyright_file):
-            with open(copyright_file, encoding="utf-8") as f:
-                final_text = f.read()
         if _saved_stdout is not None:
             sys.stdout = _saved_stdout
-        if not output_file:
-            sys.stdout.write(final_text)
-        else:
-            print(f"Generated copyright written to: {copyright_file}",
-                  file=sys.stderr)
+        print(f"\nGenerated copyright written to: {copyright_file}",
+              file=sys.stderr)
 PYEOF
 
 echo "Done." >&2
