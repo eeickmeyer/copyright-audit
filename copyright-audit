@@ -2189,8 +2189,21 @@ def check_copyright_holders():
             if fnmatch.fnmatch(fp, glob_pat) or glob_pat == "*":
                 governing_glob = glob_pat
         if governing_glob is not None:
+            # Detect GPL-family licenses on this file so we can suppress
+            # FSF's copyright on the license text itself (not a project
+            # copyright — scanners attribute it from the GPL boilerplate).
+            _file_lics = " ".join(r.get("licenses", [])).lower()
+            _is_gpl_family = bool(re.search(
+                r'\b(gpl|lgpl|agpl|gfdl|gnu)\b', _file_lics))
             for c in r.get("copyrights", []):
                 if c:
+                    # Skip FSF copyright that scanners pull from GPL
+                    # license boilerplate — this is the license author,
+                    # not a project copyright holder.
+                    if _is_gpl_family and re.search(
+                            r'free\s+software\s+foundation',
+                            c, re.IGNORECASE):
+                        continue
                     detected_per_glob[governing_glob].add(c)
                     holder_file_map[(governing_glob, c)].add(fp)
                     if governing_glob == "*":
@@ -3270,7 +3283,7 @@ if mode == "review":
     dep5_ok = not dep5_errors
 
     # Test 11: Copyright holder accuracy
-    missing_holders, extra_holders, _, _ = check_copyright_holders()
+    missing_holders, extra_holders, _, holder_file_map = check_copyright_holders()
     if not missing_holders and not extra_holders:
         print("[PASS] Copyright holders match detected holders")
     else:
@@ -3281,6 +3294,12 @@ if mode == "review":
             _lim = len(missing_holders) if verbose else 3
             for glob_pat, holder in missing_holders[:_lim]:
                 print(f"        + {glob_pat}: {holder}")
+                if verbose:
+                    _src_files = sorted(holder_file_map.get((glob_pat, holder), set()))
+                    for _sf in _src_files[:5]:
+                        print(f"            found in: {_sf}")
+                    if len(_src_files) > 5:
+                        print(f"            ... and {len(_src_files) - 5} more file(s)")
             if len(missing_holders) > _lim:
                 print(f"        ... and {len(missing_holders) - _lim} more")
         if extra_holders:
