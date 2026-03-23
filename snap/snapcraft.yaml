@@ -66,6 +66,7 @@ parts:
       - gcc
       - pkg-config
       - libicu-dev
+      - libffi-dev
     override-build: |
       python3 -m venv "${SNAPCRAFT_PART_INSTALL}/scancode"
       "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install --upgrade pip
