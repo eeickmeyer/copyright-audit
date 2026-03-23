@@ -35,6 +35,36 @@ All notable changes to this project are documented in this file.
 - Snap: `base-files` stage-package (in its own part, filtered to
   `usr/share/common-licenses/` only) so common-licenses references
   resolve correctly under strict confinement
+- Binary garbage copyright filter: `_is_plausible_copyright()` rejects
+  strings with high non-ASCII/non-printable character ratios (< 70%
+  printable ASCII or < 3 printable chars), eliminating false copyright
+  holders extracted from binary files (PNG, GIF, etc.)
+- DEP-5 license block boilerplate: `_dep5_common_license_body()` now
+  generates full preamble text for all common license families (GPL,
+  LGPL, AGPL, GFDL, Apache, MPL, Artistic, BSD, CC0) with proper
+  "or later version" clauses and common-licenses pointers, matching
+  the format used in real Debian packages. Applied in generate mode,
+  Fix 3 (missing blocks), Fix 3b (empty/stub blocks), and Fix 8
+  (inline replacement)
+- DEP-5 body line wrapping: `_wrap_dep5_body()` re-wraps any license
+  body lines exceeding 79 columns at word boundaries, keeping the
+  generated copyright file within standard column limits
+- Fix 0c: FSF boilerplate copyright removal — strips "Free Software
+  Foundation" from Copyright fields in GPL-family stanzas (both in
+  existing stanzas and scanner-generated content in generate/fix mode)
+- Fix 0d: License text file path removal — removes REUSE-spec
+  `LICENSES/*.txt` paths from per-file stanzas (covered by `Files: *`)
+- `LICENSES/*` and `licenses/*` added to `_METADATA_GLOBS` so the
+  REUSE spec license text directory is treated as metadata
+- Generate mode `debian/*` stanza: non-native packages now get a
+  `debian/*` stanza with packager identity and GPL-2+ license, matching
+  the behavior of `--fix` mode (interactive prompt, editable)
+- Fix 5 year update: when the packager is already listed in the
+  `debian/*` stanza but the current year is missing, offers to extend
+  the year range (e.g. `2024-2025` → `2024-2026`)
+- Review mode verdict: license incompatibility is now a blocker —
+  `VERDICT: BLOCKED` takes priority over all other verdicts when
+  `check_license_compatibility()` finds conflicts
 
 ### Fixed
 - False positive when checking `/usr/share/common-licenses/` references
@@ -56,6 +86,15 @@ All notable changes to this project are documented in this file.
   indicating a real problem
 - Snap: `PYTHONUNBUFFERED=1` added to snap environment so tqdm-based
   progress bars (e.g. from decopy) are visible in strict confinement
+- Generate mode no longer writes a `.bak` file (uses `_decopy_generated`
+  flag to detect the generate→check pipeline instead of checking mode)
+- Fix 5 `has_debian_glob` now checks `working_text` directly instead of
+  the stale `stanzas` list, so a `debian/*` stanza removed by earlier
+  fixes (e.g. Unknown license resolution) is correctly detected as
+  missing and re-created with the packager's identity
+- Fix 5 `debian/*` stanza packager check extracts copyright lines from
+  `working_text` instead of the stale `stanza_copyrights` dict,
+  ensuring year-update logic works with normalized content
 
 ## 2026-03-21
 
