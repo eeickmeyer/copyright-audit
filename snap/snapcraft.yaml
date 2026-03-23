@@ -72,7 +72,9 @@ parts:
       # Pre-install extractcode to work around its invalid Requires-Python
       # specifier (>=3.6.*) that causes pip backtracking on architectures
       # without pre-built wheels (arm64, s390x, ppc64el, armhf).
-      "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install 'extractcode[full]>=31.0.0' --ignore-requires-python
+      # Do NOT use extractcode[full] — the "full" extra requires extractcode-7z
+      # and extractcode-libarchive which only have x86_64 wheels.
+      "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install 'extractcode>=31.0.0' --ignore-requires-python
       "${SNAPCRAFT_PART_INSTALL}/scancode/bin/pip" install scancode-toolkit
       find "${SNAPCRAFT_PART_INSTALL}/scancode/bin" -maxdepth 1 -type f -exec \
         sed -i '1s|^#!.*python.*$|#!/usr/bin/env python3|' {} +
