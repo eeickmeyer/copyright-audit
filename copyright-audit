@@ -2639,6 +2639,89 @@ def _simplify_file_list(paths, all_dir_counts=None):
     return deduped
 
 # ══════════════════════════════════════════════════════════════════════
+# Superfluous pattern / stanza detection
+# ══════════════════════════════════════════════════════════════════════
+
+def check_superfluous(text=None):
+    """Identify superfluous file patterns and stanzas in debian/copyright.
+
+    A pattern is superfluous if it matches no scanned file (stale).
+    An entire stanza is superfluous if:
+      - ALL its patterns match no files, OR
+      - its license and copyright holders are identical to (or a subset
+        of) those in the catch-all Files: * stanza.
+
+    Returns a list of dicts:
+      [{"stanza": dict, "reason": str, "stale_patterns": [str],
+        "kept_patterns": [str], "remove_entirely": bool}]
+    """
+    src = text if text is not None else copyright_text
+    para_stanzas = _parse_paragraph_stanzas(src)
+    scanned_paths = set(r["path"].lstrip("./") for r in scan_results)
+
+    # Find catch-all info
+    catchall_lic = None
+    catchall_cops_norm = set()
+    for ps in para_stanzas:
+        if ps["files"] == ["*"]:
+            catchall_lic = ps["license"]
+            catchall_cops_norm = {norm_copyright(c)
+                                  for c in ps["cops"]
+                                  if norm_copyright(c)}
+            break
+
+    results = []
+    for ps in para_stanzas:
+        if ps["files"] == ["*"]:
+            continue
+
+        stale_pats = []
+        kept_pats = []
+        for pat in ps["files"]:
+            if any(fnmatch.fnmatch(sp, pat) for sp in scanned_paths):
+                kept_pats.append(pat)
+            else:
+                stale_pats.append(pat)
+
+        if not kept_pats and stale_pats:
+            # All patterns are stale → entire stanza is superfluous
+            results.append({
+                "stanza": ps,
+                "reason": "all file patterns match no files",
+                "stale_patterns": stale_pats,
+                "kept_patterns": [],
+                "remove_entirely": True,
+            })
+        elif stale_pats:
+            # Some patterns are stale
+            results.append({
+                "stanza": ps,
+                "reason": "some file patterns match no files",
+                "stale_patterns": stale_pats,
+                "kept_patterns": kept_pats,
+                "remove_entirely": False,
+            })
+        elif catchall_lic is not None:
+            # Check if stanza is redundant with catch-all
+            stanza_cops_norm = {norm_copyright(c)
+                                for c in ps["cops"]
+                                if norm_copyright(c)}
+            if (licenses_compatible(ps["license"], catchall_lic)
+                    and licenses_compatible(catchall_lic, ps["license"])
+                    and stanza_cops_norm
+                    and stanza_cops_norm <= catchall_cops_norm):
+                results.append({
+                    "stanza": ps,
+                    "reason": "redundant with catch-all "
+                              "(same license and copyright holders)",
+                    "stale_patterns": [],
+                    "kept_patterns": ps["files"],
+                    "remove_entirely": True,
+                })
+
+    return results
+
+# ══════════════════════════════════════════════════════════════════════
 # False-positive heuristic
 # ══════════════════════════════════════════════════════════════════════
 def classify_fp(filepath, detected, declared):
@@ -3495,6 +3578,31 @@ if mode == "review":
     if len(stale) > _lim:
         print(f"        ... and {len(stale) - _lim} more")
 
+    # Test 10b: Superfluous stanzas/patterns
+    _superfluous = check_superfluous()
+    _sup_entire = [s for s in _superfluous if s["remove_entirely"]]
+    _sup_partial = [s for s in _superfluous if not s["remove_entirely"]]
+    if _superfluous:
+        status = "WARN"
+        print(f"[{status}] Superfluous stanzas/patterns: "
+              f"{len(_sup_entire)} stanza(s) removable, "
+              f"{len(_sup_partial)} with stale patterns")
+        _lim = len(_superfluous) if verbose else 5
+        for sup in _superfluous[:_lim]:
+            ps = sup["stanza"]
+            fp = " ".join(ps["files"][:3])
+            if len(ps["files"]) > 3:
+                fp += " ..."
+            if sup["remove_entirely"]:
+                print(f"        {fp}  ({sup['reason']})")
+            else:
+                print(f"        {fp}  (stale: "
+                      f"{', '.join(sup['stale_patterns'])})")
+        if len(_superfluous) > _lim:
+            print(f"        ... and {len(_superfluous) - _lim} more")
+    else:
+        print("[PASS] No superfluous stanzas or patterns")
+
     print()
     lic_ok = not lic_issues or not errors
     cov_ok = len(src_uncovered) == 0
@@ -3681,6 +3789,7 @@ if mode == "review":
     override_ok = not override_issues
     dup_ok = not dup_files
     compat_ok = not all_compat
+    superfluous_ok = not _superfluous
 
     if not compat_ok:
         print("VERDICT: BLOCKED — license incompatibility detected. "
@@ -3688,7 +3797,7 @@ if mode == "review":
     elif (real_count == 0 and not missing_in_copyright and not nonfree_found
             and lic_ok and cov_ok and not stale and dep5_ok
             and not missing_holders and fixme_ok and versionless_ok
-            and override_ok and dup_ok):
+            and override_ok and dup_ok and superfluous_ok):
         print("VERDICT: debian/copyright appears complete and accurate.")
     elif real_count < 10 and not nonfree_found and dep5_ok:
         print("VERDICT: Minor issues — mostly acceptable, review flagged items.")
@@ -4034,6 +4143,38 @@ else:
         print("All Files: globs match at least one file in the source tree.")
         print()
 
+    _superfluous = check_superfluous()
+    if _superfluous:
+        entirely = [s for s in _superfluous if s["remove_entirely"]]
+        partially = [s for s in _superfluous if not s["remove_entirely"]]
+        if entirely:
+            print(f"{len(entirely)} entirely superfluous stanza(s) found:")
+            print("  (These can be removed without changing effective coverage)\n")
+            for sup in entirely:
+                ps = sup["stanza"]
+                files_preview = " ".join(ps["files"][:3])
+                if len(ps["files"]) > 3:
+                    files_preview += f" ... (+{len(ps['files'])-3} more)"
+                print(f"    Files: {files_preview}")
+                print(f"      Reason: {sup['reason']}")
+            print()
+        if partially:
+            print(f"{len(partially)} stanza(s) with superfluous patterns:")
+            print("  (Individual patterns that match no files)\n")
+            for sup in partially:
+                ps = sup["stanza"]
+                files_preview = " ".join(ps["files"][:3])
+                if len(ps["files"]) > 3:
+                    files_preview += f" ... (+{len(ps['files'])-3} more)"
+                print(f"    Files: {files_preview}")
+                print(f"      Stale: {', '.join(sup['stale_patterns'][:5])}"
+                      f"{'...' if len(sup['stale_patterns']) > 5 else ''}")
+            print()
+        print("  TIP: Run with --fix to remove superfluous patterns/stanzas.\n")
+    elif stanzas:
+        print("No superfluous stanzas or patterns detected.")
+        print()
+
     # Check for missing debian/* stanza (not applicable for native packages)
     has_debian_glob = any(g in ("debian/*", "debian/**") for g, _ in stanzas)
     if stanzas and not has_debian_glob and not is_native:
@@ -4196,7 +4337,9 @@ else:
         if sanity_consensus:
             print(f"  Scanner cross-validation (2-of-3 ok):  {len(sanity_consensus)}")
 
-    total_issues = real_count + len(src_uncovered) + len(stale) + len(dep5_errors)
+    _superfluous_count = len(_superfluous) if '_superfluous' in dir() else 0
+    total_issues = (real_count + len(src_uncovered) + len(stale)
+                    + len(dep5_errors) + _superfluous_count)
     if total_issues == 0:
         print("\n  RESULT: debian/copyright appears complete.")
     else:
@@ -4802,39 +4945,128 @@ else:
                         r'\n\nLicense: Unknown\n(?:[^\n]*\n)*?(?=\n|$)',
                         '', working_text)
 
-        # ── Fix 2: Remove stale globs ────────────────────────────────
-        if stale:
-            print(f"{len(stale)} stale glob(s) found that match no file:\n")
-            for glob_pat, lic in stale:
-                print(f"  Stale: {glob_pat}  (License: {lic})")
-            answer = ask("\n  Remove all stale globs? [y/N/A/X] ", batch=True).strip().lower()
+        # ── Fix 2: Remove superfluous files/patterns/stanzas ────────
+        superfluous = check_superfluous(working_text)
+        if superfluous:
+            entirely = [s for s in superfluous if s["remove_entirely"]]
+            partially = [s for s in superfluous
+                         if not s["remove_entirely"]]
+            total_count = len(entirely) + len(partially)
+            print(f"{total_count} superfluous stanza(s)/pattern(s) found:\n")
+
+            for sup in entirely:
+                ps = sup["stanza"]
+                files_preview = " ".join(ps["files"][:3])
+                if len(ps["files"]) > 3:
+                    files_preview += f" ... (+{len(ps['files'])-3})"
+                print(f"  Stanza: Files: {files_preview}")
+                print(f"    → remove entirely ({sup['reason']})")
+
+            for sup in partially:
+                ps = sup["stanza"]
+                files_preview = " ".join(ps["files"][:3])
+                if len(ps["files"]) > 3:
+                    files_preview += f" ... (+{len(ps['files'])-3})"
+                print(f"  Stanza: Files: {files_preview}")
+                print(f"    → remove stale: "
+                      f"{', '.join(sup['stale_patterns'])}")
+
+            answer = ask(
+                "\n  Remove superfluous patterns/stanzas? "
+                "[y/N/A/X] ", batch=True).strip().lower()
             if answer in ("y", "yes"):
-                for glob_pat, lic in stale:
-                    escaped = re.escape(glob_pat)
-                    # 1) Remove glob if it's the only entry on a continuation line
-                    working_text = re.sub(
-                        r'\n +' + escaped + r' *(?=\n)', '', working_text)
-                    # 2) Remove glob when sharing a line with other globs
-                    #    (on Files: line or continuation — just drop the token)
-                    working_text = re.sub(
-                        r'(?<= )' + escaped + r'(?= |\n)', '', working_text)
-                    # 3) Clean up any double-spaces left by token removal
-                    working_text = re.sub(r'(Files: ) +', r'\1', working_text)
-                    working_text = re.sub(r'(?<=\n) {8,}(?=\S)', '       ', working_text)
-                    # 4) If Files: line is now empty, remove the entire stanza
-                    working_text = re.sub(
-                        r'\nFiles: *\n'
-                        r'Copyright:[^\n]*(?:\n +[^\n]+)*\n'
-                        r'License:[^\n]*(?:\n .*)*',
-                        '', working_text)
-                    # 5) If glob was the sole entry, remove the entire stanza
-                    working_text = re.sub(
-                        r'\nFiles: ' + escaped + r'\n'
-                        r'Copyright:[^\n]*(?:\n +[^\n]+)*\n'
-                        r'License:[^\n]*(?:\n .*)*',
-                        '', working_text)
+                paras = working_text.split("\n\n")
+                new_paras = []
+                removed_lics = set()
+
+                for para in paras:
+                    matched_sup = None
+                    for sup in superfluous:
+                        if sup["stanza"]["para_text"] == para:
+                            matched_sup = sup
+                            break
+                    if matched_sup is None:
+                        new_paras.append(para)
+                        continue
+
+                    if matched_sup["remove_entirely"]:
+                        removed_lics.add(
+                            matched_sup["stanza"]["license"])
+                        fp = " ".join(
+                            matched_sup["stanza"]["files"][:2])
+                        if len(matched_sup["stanza"]["files"]) > 2:
+                            fp += "..."
+                        print(f"  ✓ Removed stanza: "
+                              f"Files: {fp}")
+                    else:
+                        # Remove stale patterns, keep the rest
+                        kept = matched_sup["kept_patterns"]
+                        lines = para.split("\n")
+                        new_lines = []
+                        in_files = False
+                        files_replaced = False
+                        for line in lines:
+                            if (line.startswith("Files:")
+                                    and not files_replaced):
+                                in_files = True
+                                new_lines.append(
+                                    format_files_field(kept))
+                                files_replaced = True
+                            elif in_files and line.startswith(
+                                    " ") and not line.startswith(
+                                    " ."):
+                                # Skip old continuation lines
+                                continue
+                            else:
+                                in_files = False
+                                new_lines.append(line)
+                        new_paras.append("\n".join(new_lines))
+                        for sp in matched_sup["stale_patterns"]:
+                            print(f"  ✓ Removed pattern: {sp}")
+
+                working_text = "\n\n".join(
+                    p for p in new_paras if p.strip())
+
+                # Remove orphaned standalone License: blocks
+                remaining_lics = set()
+                for para in working_text.split("\n\n"):
+                    plines = para.strip().split("\n")
+                    has_files = any(
+                        l.strip().startswith("Files:")
+                        for l in plines)
+                    if has_files:
+                        for l in plines:
+                            if l.startswith("License:"):
+                                lic = (l[8:].strip().split()[0]
+                                       if l[8:].strip() else None)
+                                if lic:
+                                    remaining_lics.add(lic)
+
+                orphaned_paras = []
+                for para in working_text.split("\n\n"):
+                    plines = para.strip().split("\n")
+                    if not plines:
+                        continue
+                    first = plines[0]
+                    has_files = any(
+                        l.strip().startswith("Files:")
+                        for l in plines)
+                    if (first.startswith("License:")
+                            and not has_files):
+                        lic_name = (
+                            first[8:].strip().split()[0]
+                            if first[8:].strip() else None)
+                        if (lic_name
+                                and lic_name in removed_lics
+                                and lic_name not in remaining_lics):
+                            print(f"  ✓ Removed orphaned "
+                                  f"License block: {lic_name}")
+                            continue
+                    orphaned_paras.append(para)
+
+                working_text = "\n\n".join(orphaned_paras)
                 changes_made += 1
-                print("  ✓ Removed.\n")
+                print()
             else:
                 print("  ✗ Skipped.\n")
 
