@@ -135,6 +135,12 @@ avoid splitting names like "Rep Invariant Systems, Inc." on commas.
 | 2104–2156 | `check_consolidation()` | Groups stanzas by (license, holder-set); identifies merge candidates |
 | 2159–2232 | `_simplify_file_list()` | Reduces file lists to dir/* globs; merges sibling globs with common prefixes |
 
+### Superfluous Detection (lines 2645–2722)
+
+| Lines | Function | Purpose |
+|-------|----------|--------|
+| 2645–2722 | `check_superfluous()` | Identifies superfluous stanzas/patterns: (1) all patterns stale → remove stanza, (2) some patterns stale → remove stale only, (3) stanza redundant with catch-all (bidirectional `licenses_compatible()` + copyright-holder subset check) → remove stanza. Returns list of dicts with `stanza`, `reason`, `stale_patterns`, `kept_patterns`, `remove_entirely` |
+
 ### False-Positive Classification & Compatibility (lines 2234–2387)
 
 | Lines | Function | Purpose |
@@ -191,6 +197,7 @@ Structured pass/fail report with 19 tests.
 | 8 | 3458 | License text completeness |
 | 9 | 3473 | Stanza coverage (uncovered files) |
 | 10 | 3489 | Stale stanza globs |
+| 10b | 3581 | Superfluous stanzas/patterns (entirely removable + stale-pattern stanzas; VERDICT via `superfluous_ok`) |
 | 11 | 3503 | Copyright holder accuracy (undeclared = WARN; declared-not-detected = INFO) |
 | 12 | 3530 | Decopy findings |
 | 13 | 3532 | Low-confidence detections |
@@ -242,7 +249,7 @@ decopy-accelerated generate path is active.
 | 0d | 4497 | Remove license text file paths (`LICENSES/*`) from per-file stanzas |
 | 1 | 4548 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
 | 1b | 4687 | Resolve `Unknown` license stanzas — covered by `Files: *` or needs scanner data |
-| 2 | 4805 | Remove stale globs that match no file |
+| 2 | 4948 | Remove superfluous files/patterns/stanzas — removes entire stanzas (all-stale or catch-all-redundant), strips stale patterns from partial stanzas, cleans up orphaned standalone `License:` blocks |
 | 3 | 4841 | Add missing standalone `License:` text blocks (full DEP-5 boilerplate via `_dep5_common_license_body()` or SPDX fetch) |
 | 3b | 4911 | Fix empty/stub standalone license blocks (same boilerplate generation) |
 | 4 | 4976 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |

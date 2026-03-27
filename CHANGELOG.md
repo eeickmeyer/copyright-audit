@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-03-26
+
+### Changed
+- Fix 2 overhauled: replaced regex-based stale glob removal with
+  paragraph-level superfluous detection and removal. Now handles three
+  cases: (1) stanzas where all file patterns match no files (removed
+  entirely), (2) stanzas with some stale patterns (stale patterns
+  stripped, stanza kept), and (3) stanzas redundant with the catch-all
+  `Files: *` (same license and copyright holder subset — removed
+  entirely). Orphaned standalone `License:` blocks no longer referenced
+  by any `Files:` stanza are cleaned up automatically
+
+### Added
+- `check_superfluous()` function: identifies superfluous file patterns
+  and entire stanzas in `debian/copyright` — stale patterns (matching
+  no scanned file), fully stale stanzas, and catch-all-redundant
+  stanzas (bidirectional `licenses_compatible()` + copyright holder
+  subset check)
+- Review mode Test 10b: reports superfluous stanzas and patterns with
+  `[WARN]`/`[PASS]` status; integrated into the four-tier VERDICT
+  via `superfluous_ok`
+- Check mode SECTION 6: reports entirely superfluous stanzas and
+  partially superfluous patterns with per-stanza details and a
+  `--fix` tip; count included in `total_issues` summary
+
 ## 2026-03-22
 
 ### Added
