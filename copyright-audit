@@ -5165,14 +5165,27 @@ else:
             body_text = re.sub(r'(?m)^Comment:.*', '', body).strip()
             body_text = re.sub(r'(?m)^ ', '', body_text).strip()
             # Skip if already has a valid common-licenses reference
-            if '/usr/share/common-licenses/' in body:
-                new_paras.append(para)
-                continue
-            # Only fix if body is empty or a stub placeholder
-            is_stub = (len(body_text) < 80
-                       or re.search(r'FIXME|TODO|add the .* license text|'
-                                    r'add the .* text here|corresponding license',
-                                    body, re.IGNORECASE))
+            # (but NOT if it references a file that doesn't exist)
+            _cl_ref = re.search(r'/usr/share/common-licenses/([\w.+-]+)', body)
+            if _cl_ref:
+                _cl_name = _cl_ref.group(1)
+                _cl_slug = lic_name.rstrip("+")
+                if (_cl_name in SYSTEM_COMMON_LICENSES
+                        or _cl_slug in SYSTEM_COMMON_LICENSES
+                        or lic_name in COMMON_LICENSES):
+                    new_paras.append(para)
+                    continue
+                # References a non-existent common-licenses file — force fix
+                is_stub = True
+                print(f"  License '{lic_name}' references "
+                      f"/usr/share/common-licenses/{_cl_name} which does "
+                      f"not exist — replacing", file=sys.stderr)
+            else:
+                # Only fix if body is empty or a stub placeholder
+                is_stub = (len(body_text) < 80
+                           or re.search(r'FIXME|TODO|add the .* license text|'
+                                        r'add the .* text here|corresponding license',
+                                        body, re.IGNORECASE))
             if not is_stub:
                 new_paras.append(para)
                 continue
