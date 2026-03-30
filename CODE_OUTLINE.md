@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (5 965 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (6 089 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -248,7 +248,8 @@ decopy-accelerated generate path is active.
 | 0c | 4435 | Remove FSF boilerplate copyright from GPL-family stanzas |
 | 0d | 4497 | Remove license text file paths (`LICENSES/*`) from per-file stanzas |
 | 1 | 4548 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
-| 1b | 4687 | Resolve `Unknown` license stanzas — covered by `Files: *` or needs scanner data |
+| 1c | 4830 | Correct wrong license in existing stanzas — when cross-validation (2+ scanners agree) confirms the primary scanner's detection differs from the declared license, offers to update the stanza in-place |
+| 1b | 4955 | Resolve `Unknown` license stanzas — covered by `Files: *` or needs scanner data |
 | 2 | 4948 | Remove superfluous files/patterns/stanzas — removes entire stanzas (all-stale or catch-all-redundant), strips stale patterns from partial stanzas, cleans up orphaned standalone `License:` blocks |
 | 3 | 4841 | Add missing standalone `License:` text blocks (full DEP-5 boilerplate via `_dep5_common_license_body()` or SPDX fetch) |
 | 3b | 4911 | Fix empty/stub standalone license blocks (same boilerplate generation); validates common-licenses references exist before skipping — bogus refs (e.g. CC-BY-SA-3.0) trigger replacement |

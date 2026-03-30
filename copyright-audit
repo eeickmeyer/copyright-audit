@@ -4827,6 +4827,130 @@ else:
                 else:
                     print(f"  ✗ Skipped.\n")
 
+        # ── Fix 1c: Correct wrong license in existing stanzas ───────
+        # Fix 1 skips files that already have a specific stanza, but
+        # that stanza may declare the wrong license (e.g. decopy said
+        # MIT-open-group but scancode + licensecheck both say
+        # HPND-sell-variant).  When cross-validation confirms the
+        # scanner's result, offer to update the stanza license.
+        if real_mismatches and all_sanity_results:
+            # Collect mismatched files that DO have a specific stanza
+            _stanza_mismatches = defaultdict(lambda: {"det": None, "decl": None, "files": []})
+            for (det, decl), files in real_mismatches.items():
+                for f in files:
+                    fp = f.lstrip("./")
+                    if fp.startswith("debian/"):
+                        continue
+                    # Find which specific stanza covers this file
+                    for glob_pat, lic in stanzas:
+                        if glob_pat == "*":
+                            continue
+                        if fnmatch.fnmatch(fp, glob_pat) or fp == glob_pat:
+                            key = (glob_pat, det, decl)
+                            _stanza_mismatches[key]["det"] = det
+                            _stanza_mismatches[key]["decl"] = decl
+                            _stanza_mismatches[key]["files"].append(f)
+                            break
+
+            fix1c_count = 0
+            for (glob_pat, det, decl), info in sorted(_stanza_mismatches.items()):
+                # Check if cross-validation supports the primary scanner
+                _confirmed = False
+                _confirming_tool = None
+                for f in info["files"]:
+                    fp_norm = "./" + f.lstrip("./")
+                    fp_bare = f.lstrip("./")
+                    for _tool, _sr in all_sanity_results.items():
+                        raw = _sr.get(fp_bare, _sr.get(fp_norm, set()))
+                        if raw:
+                            secondary_dep5 = {to_dep5(l) for l in raw if l}
+                            if det in secondary_dep5:
+                                _confirmed = True
+                                _confirming_tool = _tool
+                                break
+                            # Also check by family
+                            det_fam = re.sub(r'[- ]\d[\d.]*\+?$', '', det).lower()
+                            for sl in secondary_dep5:
+                                sl_fam = re.sub(r'[- ]\d[\d.]*\+?$', '', sl).lower()
+                                if det_fam == sl_fam:
+                                    _confirmed = True
+                                    _confirming_tool = _tool
+                                    break
+                        if _confirmed:
+                            break
+                    if _confirmed:
+                        break
+
+                if not _confirmed:
+                    continue
+
+                n = len(info["files"])
+                print(f"  Stanza '{glob_pat}' declares '{decl}' but "
+                      f"{scanner} + {_confirming_tool} both detect "
+                      f"'{det}' ({n} file(s))")
+                answer = ask(f"  Update license {decl} → {det}? "
+                             f"[y/N/A/X] ", batch=True).strip().lower()
+                if answer in ("y", "yes"):
+                    # Find the stanza paragraph in working_text and
+                    # replace the License: line
+                    _updated = False
+                    new_paras_1c = []
+                    for para in working_text.split("\n\n"):
+                        plines = para.strip().split("\n")
+                        has_files = any(
+                            l.strip().startswith("Files:")
+                            for l in plines)
+                        if not has_files:
+                            new_paras_1c.append(para)
+                            continue
+                        # Check if this stanza's Files: contain our glob
+                        _file_globs = []
+                        for l in plines:
+                            if l.startswith("Files:"):
+                                _file_globs.extend(l[6:].split())
+                            elif (l.startswith(" ") and _file_globs
+                                  and not any(
+                                      l.strip().startswith(t)
+                                      for t in ("Copyright:", "License:",
+                                                 "Comment:"))):
+                                _file_globs.extend(l.split())
+                        if glob_pat not in _file_globs:
+                            new_paras_1c.append(para)
+                            continue
+                        # Check the License: field matches decl
+                        _lic_match = False
+                        for l in plines:
+                            if l.startswith("License:"):
+                                _lic_val = l[8:].strip().split()[0]
+                                if _lic_val == decl:
+                                    _lic_match = True
+                                break
+                        if not _lic_match or _updated:
+                            new_paras_1c.append(para)
+                            continue
+                        # Replace the license
+                        new_lines = []
+                        for l in plines:
+                            if l.startswith("License:"):
+                                new_lines.append(f"License: {det}")
+                            else:
+                                new_lines.append(l)
+                        new_paras_1c.append("\n".join(new_lines))
+                        _updated = True
+                    if _updated:
+                        working_text = "\n\n".join(new_paras_1c)
+                        fix1c_count += 1
+                        print(f"  ✓ Updated.\n")
+                    else:
+                        print(f"  ✗ Stanza not found in text.\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+
+            if fix1c_count:
+                changes_made += 1
+                print(f"Corrected license in {fix1c_count} stanza(s) "
+                      f"based on cross-validation consensus.\n")
+
         # ── Fix 1b: Resolve 'Unknown' license stanzas ───────────────
         # Decopy sometimes assigns 'Unknown' when it cannot determine
         # the license.  Use scanner results to resolve where possible.

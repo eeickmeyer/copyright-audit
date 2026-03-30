@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-03-30
+
+### Added
+- Fix 1c: cross-validation-backed license correction — when a specific
+  stanza declares the wrong license (e.g. decopy said MIT-open-group
+  but scancode detected HPND-sell-variant), Fix 1c consults the
+  secondary scanner results (licensecheck and/or decopy). If at least
+  two scanners agree on the detected license, the tool offers to
+  update the stanza in-place. Previously, Fix 1 skipped files with
+  existing specific stanzas, assuming the declaration was intentional,
+  so review mode would flag a mismatch that check+fix never corrected
+
 ## 2026-03-29
 
 ### Fixed
