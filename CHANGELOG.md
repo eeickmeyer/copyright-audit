@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-03-29
+
+### Fixed
+- Fix 3b: common-licenses reference validation — standalone license
+  blocks referencing `/usr/share/common-licenses/<name>` where the
+  file does not actually exist (e.g. CC-BY-SA-3.0, which is not
+  shipped in common-licenses) are now detected and replaced with the
+  full license text fetched from SPDX/CC, instead of being silently
+  skipped. Previously, decopy could generate a CC-BY-SA-3.0 block
+  with a bogus common-licenses pointer that Fix 3b would trust
+  because it only checked for the presence of the path string, not
+  whether the referenced file exists on disk
+
 ## 2026-03-26
 
 ### Changed
