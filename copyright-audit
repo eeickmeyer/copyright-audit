@@ -89,17 +89,30 @@ while [[ $# -gt 0 ]]; do
             NO_FETCH=true; shift ;;
         -j|--jobs)
             [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --jobs requires a positive integer, got '$2'" >&2; exit 1
+            fi
             JOBS="$2"; shift 2 ;;
         -h|--help)
             show_help ;;
+        --)
+            shift; SRCDIR="$1"; shift; break ;;
         -*)
             echo "Unknown option: $1" >&2; exit 1 ;;
         *)
+            if [[ -n "$SRCDIR" ]]; then
+                echo "Error: unexpected argument '$1' (source directory already set to '$SRCDIR')" >&2
+                exit 1
+            fi
             SRCDIR="$1"; shift ;;
     esac
 done
 
 SRCDIR="${SRCDIR:-.}"
+if [[ ! -d "$SRCDIR" ]]; then
+    echo "Error: source directory '$SRCDIR' does not exist or is not a directory" >&2
+    exit 1
+fi
 SRCDIR="$(cd "$SRCDIR" && pwd)"
 
 if [[ "$MODE" != "generate" ]]; then
@@ -890,17 +903,22 @@ if scanner == "scancode":
                 continue
             spdx = det.get("license_expression_spdx", "") or ""
             if spdx:
-                # Split compound expressions (AND / OR / WITH)
-                for part in re.split(r'\s+AND\s+|\s+OR\s+|\s+WITH\s+', spdx):
-                    part = part.strip("() ")
-                    if part and not part.startswith("LicenseRef-scancode-"):
-                        lics.append(part)
+                # Split compound expressions (AND / OR);
+                # WITH introduces an exception (not a standalone license)
+                for part in re.split(r'\s+AND\s+|\s+OR\s+', spdx):
+                    # Strip any "WITH exception" suffix
+                    base = re.split(r'\s+WITH\s+', part, maxsplit=1)[0]
+                    base = base.strip("() ")
+                    if base and not base.startswith("LicenseRef-scancode-"):
+                        lics.append(base)
             else:
                 expr = det.get("license_expression", "") or ""
-                for part in re.split(r'\s+AND\s+|\s+OR\s+|\s+WITH\s+', expr, flags=re.IGNORECASE):
-                    part = part.strip("() ")
-                    if part and not part.lower().startswith("licenseref-scancode-"):
-                        lics.append(part)
+                for part in re.split(r'\s+AND\s+|\s+OR\s+', expr, flags=re.IGNORECASE):
+                    # Strip any "WITH exception" suffix
+                    base = re.split(r'\s+WITH\s+', part, maxsplit=1, flags=re.IGNORECASE)[0]
+                    base = base.strip("() ")
+                    if base and not base.lower().startswith("licenseref-scancode-"):
+                        lics.append(base)
         cops = []
         for c in entry.get("copyrights", []):
             val = c.get("copyright", "")
@@ -1405,10 +1423,11 @@ def _dir_has_license_file(d):
 def dir_dominant_license(d):
     """Return the most common license tuple for directory *d*.
 
-    Only uses licenses detected in the SAME directory."""
+    Only uses licenses detected in the SAME directory.
+    Ties are broken alphabetically for determinism."""
     if d in _dir_lic_counts and _dir_lic_counts[d]:
         return max(_dir_lic_counts[d],
-                   key=_dir_lic_counts[d].get)
+                   key=lambda k: (_dir_lic_counts[d][k], k))
     return None
 
 def dir_copyrights(d):
@@ -1918,12 +1937,13 @@ def fix_dep5_format(text):
     if len(text) != old_len:
         fixes.append("Collapsed multiple consecutive blank lines")
 
-    # Fix tab indentation → spaces
+    # Fix tab indentation → spaces (each leading tab → one space)
     tab_count = 0
     new_lines = []
     for line in text.split("\n"):
         if line.startswith("\t"):
-            line = " " + line.lstrip("\t")
+            n_tabs = len(line) - len(line.lstrip("\t"))
+            line = " " * n_tabs + line.lstrip("\t")
             tab_count += 1
         new_lines.append(line)
     if tab_count > 0:
@@ -2050,7 +2070,12 @@ def _parse_copyright(s):
     Returns (years: set[int], author: str)."""
     years = set()
     for lo, hi in _YEAR_RANGE_RE.findall(s):
-        for y in range(int(lo), int(hi) + 1):
+        lo_i, hi_i = int(lo), int(hi)
+        if hi_i - lo_i > 200:  # sanity cap for malformed ranges
+            years.add(lo_i)
+            years.add(hi_i)
+            continue
+        for y in range(lo_i, hi_i + 1):
             years.add(y)
     for y in _YEAR_RE.findall(s):
         years.add(int(y))
@@ -5203,15 +5228,15 @@ else:
                             continue
                         # Check if this stanza's Files: contain our glob
                         _file_globs = []
+                        _in_files_1c = False
                         for l in plines:
                             if l.startswith("Files:"):
                                 _file_globs.extend(l[6:].split())
-                            elif (l.startswith(" ") and _file_globs
-                                  and not any(
-                                      l.strip().startswith(t)
-                                      for t in ("Copyright:", "License:",
-                                                 "Comment:"))):
-                                _file_globs.extend(l.split())
+                                _in_files_1c = True
+                            elif _in_files_1c and l.startswith(" ") and not l.startswith(" ."):
+                                _file_globs.extend(l.strip().split())
+                            else:
+                                _in_files_1c = False
                         if glob_pat not in _file_globs:
                             new_paras_1c.append(para)
                             continue
@@ -5268,13 +5293,15 @@ else:
                     and lic_line[8:].strip().split()[0].lower() == "unknown"):
                 # Collect the file globs from this stanza
                 globs = []
+                _in_files_1b = False
                 for l in plines:
                     if l.startswith("Files:"):
                         globs.extend(l[6:].split())
-                    elif l.startswith(" ") and not any(
-                            l.strip().startswith(f)
-                            for f in ("Copyright:", "License:", "Comment:")):
-                        globs.extend(l.split())
+                        _in_files_1b = True
+                    elif _in_files_1b and l.startswith(" ") and not l.startswith(" ."):
+                        globs.extend(l.strip().split())
+                    else:
+                        _in_files_1b = False
                 unknown_paras.append((para_idx, para, globs))
             new_paras_1b.append(para)
 
@@ -5683,13 +5710,14 @@ else:
         stanza_copyrights.clear()
         stanza_copyrights.update(stanza_copyrights_now)
 
-        missing_holders, extra_holders, star_file_map, holder_file_map = check_copyright_holders()
-
-        # Restore originals
-        stanzas.clear()
-        stanzas.extend(_saved_stanzas)
-        stanza_copyrights.clear()
-        stanza_copyrights.update(_saved_cops)
+        try:
+            missing_holders, extra_holders, star_file_map, holder_file_map = check_copyright_holders()
+        finally:
+            # Restore originals even on exception
+            stanzas.clear()
+            stanzas.extend(_saved_stanzas)
+            stanza_copyrights.clear()
+            stanza_copyrights.update(_saved_cops)
 
         # Build preferred-unicode-names dict from all declared copyrights
         # so that e.g. "Gräßlin" from one stanza is used everywhere.
