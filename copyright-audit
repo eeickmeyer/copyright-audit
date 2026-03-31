@@ -214,9 +214,10 @@ if [[ "$SCANNER" == "scancode" ]]; then
             > "$_WORKDIR/licensecheck_sanity.txt" || true
     fi
 
-    # Run decopy as a sanity check if available and in check/review mode
-    # Skip if decopy already generated the file (avoid running it twice).
-    if [[ "$MODE" != "generate" && "$DECOPY_GENERATED" != "true" ]] \
+    # Run decopy as a sanity check if available and in check/review mode.
+    # When decopy generated the file we still run it in --mode full so
+    # cross-validation data is available for Fix 1c.
+    if [[ "$MODE" != "generate" ]] \
        && command -v decopy >/dev/null 2>&1 \
        && [[ -n "$COPYRIGHT_FILE" ]]; then
         echo "Running decopy as sanity check..." >&2
@@ -234,10 +235,11 @@ else
     SCAN_FILE="$_WORKDIR/licensecheck.txt"
 
     # Also run decopy if available and in check/review mode
-    # Skip if decopy already generated the file (avoid running it twice).
-    if [[ "$MODE" != "generate" && "$DECOPY_GENERATED" != "true" ]] \
+    # When decopy generated the file we still run it as a sanity check
+    # in --mode full so cross-validation data is available for Fix 1c.
+    if [[ "$MODE" != "generate" ]] \
        && command -v decopy >/dev/null 2>&1; then
-        echo "Running decopy..." >&2
+        echo "Running decopy as sanity check..." >&2
         decopy --mode full --progress --copyright-file "$COPYRIGHT_FILE" . \
             > "$_WORKDIR/decopy.txt" || true
     fi
