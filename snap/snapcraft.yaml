@@ -12,7 +12,8 @@ description: |
     - review: structured pass/fail report for archive review
 
   Features include DEP-5 validation, license mismatch detection,
-  copyright holder auditing with fuzzy matching, automatic license
+  copyright holder auditing with fuzzy matching, upstream author
+  inference from GitHub API and package metadata, automatic license
   fetching from SPDX and Creative Commons APIs, interactive fix mode,
   and 130+ SPDX-to-DEP-5 license mappings.
 license: GPL-3.0+
