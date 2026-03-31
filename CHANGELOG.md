@@ -32,6 +32,21 @@ All notable changes to this project are documented in this file.
   existing specific stanzas, assuming the declaration was intentional,
   so review mode would flag a mismatch that check+fix never corrected
 
+### Fixed
+- Fix 0b: GitHub URL regex now strips `#fragment` and `/tree/...`
+  sub-paths before extracting owner/repo, preventing API failures on
+  URLs like `https://github.com/user/repo#readme`
+- Fix 0b: `setup.cfg` author parsing now handles INI-style unquoted
+  values (`author = John Doe`) in addition to the quoted form used by
+  `setup.py` (`author="John Doe"`)
+- Fix 0b: `pyproject.toml` author parsing now handles the common
+  inline-array format (`authors = [{name = "..."}]`) in addition to
+  the table-array format (`[[project.authors]]`)
+- Fix 0b: header stub replacement now covers `Source: FIXME` (from
+  built-in generator) in addition to `Source: TODO` (from decopy);
+  also replaces `Upstream-Name: FIXME` and `Upstream-Contact: FIXME`
+  with inferred values instead of skipping them
+
 ## 2026-03-29
 
 ### Fixed

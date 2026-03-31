@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (6 438 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (6 491 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -244,25 +244,25 @@ decopy-accelerated generate path is active.
 | Fix | Lines | What it does |
 |-----|-------|--------------|
 | 0 | 4505 | Apply DEP-5 format fixes (whitespace, tabs, blank continuations) |
-| 0b | 4523 | Populate header stubs — infers Upstream-Name from `debian/control` Source field, Upstream-Contact from GitHub API (owner profile), package metadata (`setup.py`/`setup.cfg`/`pyproject.toml`/`package.json`), or `debian/control` Maintainer as last resort; fills Source from Homepage |
-| 0c | 4718 | Remove FSF boilerplate copyright from GPL-family stanzas |
-| 0c2 | 4780 | Add missing Copyright to Files stanzas — infers from scanner data; for `Files: *`, queries GitHub API (repo owner + creation year) or package metadata before packager fallback |
-| 0d | 4886 | Remove license text file paths (`LICENSES/*`) from per-file stanzas |
-| 1 | 4937 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
-| 1c | 5076 | Correct wrong license in existing stanzas — when cross-validation (2+ scanners agree) confirms the primary scanner's detection differs from the declared license, offers to update the stanza in-place |
-| 1b | 5199 | Resolve `Unknown` license stanzas — covered by `Files: *` or needs scanner data |
-| 2 | 5317 | Remove superfluous files/patterns/stanzas — removes entire stanzas (all-stale or catch-all-redundant), strips stale patterns from partial stanzas, cleans up orphaned standalone `License:` blocks |
-| 3 | 5442 | Add missing standalone `License:` text blocks (full DEP-5 boilerplate via `_dep5_common_license_body()` or SPDX fetch) |
-| 3b | 5512 | Fix empty/stub standalone license blocks (same boilerplate generation); validates common-licenses references exist before skipping — bogus refs (e.g. CC-BY-SA-3.0) trigger replacement |
-| 4 | 5591 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |
-| 5 | 5887 | Propose `debian/*` packaging stanza, add packager to existing one, or update packager year |
-| 6 | 6058 | Consolidate stanzas sharing same license + authors |
-| 7 | 6155 | Normalize copyright lines (year ordering, email deobfuscation, brackets) |
-| 7b | 6215 | Normalize license names (e.g. `gpl-2+` → `GPL-2+`) |
-| 7c | 6244 | Strip stale "No explicit license found" comments from stanzas |
-| 7d | 6282 | Remove orphaned standalone License blocks (no longer referenced by any Files stanza) |
-| 8 | 6318 | Replace inline license text with `/usr/share/common-licenses/` references (uses `_dep5_common_license_body()`) |
-| — | ~6390 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
+| 0b | 4523 | Populate header stubs — infers Upstream-Name from `debian/control` Source field, Upstream-Contact from GitHub API (owner profile), package metadata (`setup.py`/`setup.cfg`/`pyproject.toml`/`package.json`), or `debian/control` Maintainer as last resort; fills Source from Homepage; replaces FIXME values in Source, Upstream-Name, and Upstream-Contact; handles GitHub URLs with fragments and sub-paths |
+| 0c | 4771 | Remove FSF boilerplate copyright from GPL-family stanzas |
+| 0c2 | 4833 | Add missing Copyright to Files stanzas — infers from scanner data; for `Files: *`, queries GitHub API (repo owner + creation year) or package metadata before packager fallback |
+| 0d | 4939 | Remove license text file paths (`LICENSES/*`) from per-file stanzas |
+| 1 | 4990 | Add new `Files:` stanzas for mismatched files (per-author grouping) |
+| 1c | 5129 | Correct wrong license in existing stanzas — when cross-validation (2+ scanners agree) confirms the primary scanner's detection differs from the declared license, offers to update the stanza in-place |
+| 1b | 5252 | Resolve `Unknown` license stanzas — covered by `Files: *` or needs scanner data |
+| 2 | 5370 | Remove superfluous files/patterns/stanzas — removes entire stanzas (all-stale or catch-all-redundant), strips stale patterns from partial stanzas, cleans up orphaned standalone `License:` blocks |
+| 3 | 5495 | Add missing standalone `License:` text blocks (full DEP-5 boilerplate via `_dep5_common_license_body()` or SPDX fetch) |
+| 3b | 5565 | Fix empty/stub standalone license blocks (same boilerplate generation); validates common-licenses references exist before skipping — bogus refs (e.g. CC-BY-SA-3.0) trigger replacement |
+| 4 | 5644 | Update copyright holders — adds missing holders; proposes new stanzas instead of polluting `Files: *` |
+| 5 | 5940 | Propose `debian/*` packaging stanza, add packager to existing one, or update packager year |
+| 6 | 6111 | Consolidate stanzas sharing same license + authors |
+| 7 | 6208 | Normalize copyright lines (year ordering, email deobfuscation, brackets) |
+| 7b | 6268 | Normalize license names (e.g. `gpl-2+` → `GPL-2+`) |
+| 7c | 6297 | Strip stale "No explicit license found" comments from stanzas |
+| 7d | 6335 | Remove orphaned standalone License blocks (no longer referenced by any Files stanza) |
+| 8 | 6371 | Replace inline license text with `/usr/share/common-licenses/` references (uses `_dep5_common_license_body()`) |
+| — | ~6440 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
 
 After fix mode, if the decopy-accelerated generate path is active (lines
 4609–4620), stdout is restored and the hardened file is emitted to stdout

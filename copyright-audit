@@ -4566,7 +4566,7 @@ else:
             _gh_created_year = ""
             _gh_m = re.match(
                 r'https?://github\.com/([^/]+)/([^/]+?)'
-                r'(?:\.git)?/?$',
+                r'(?:\.git)?(?:/[^#]*)?(?:#.*)?$',
                 _upstream_source) if _upstream_source else None
             if _gh_m:
                 _gh_owner, _gh_repo = _gh_m.group(1), _gh_m.group(2)
@@ -4610,46 +4610,73 @@ else:
             # ── Infer from package metadata files ────────────────────
             if not _upstream_contact:
                 # setup.py: author = "..."
+                # setup.cfg: author = ... (INI-style, no quotes)
                 for _meta in ("setup.py", "setup.cfg"):
                     if os.path.isfile(_meta):
                         try:
                             with open(_meta, encoding="utf-8",
                                       errors="replace") as _mf:
                                 _mtxt = _mf.read()
+                            # Try quoted (setup.py) then unquoted (setup.cfg)
                             _am = re.search(
                                 r'''(?:^|\n)\s*author\s*=\s*['"](.+?)['"]''',
                                 _mtxt)
+                            if not _am:
+                                _am = re.search(
+                                    r'(?:^|\n)\s*author\s*=\s*(.+)',
+                                    _mtxt)
                             _em = re.search(
                                 r'''(?:^|\n)\s*author_email\s*=\s*['"](.+?)['"]''',
                                 _mtxt)
+                            if not _em:
+                                _em = re.search(
+                                    r'(?:^|\n)\s*author_email\s*=\s*(.+)',
+                                    _mtxt)
                             if _am:
-                                _upstream_contact = _am.group(1)
+                                _upstream_contact = _am.group(1).strip()
                                 if _em:
                                     _upstream_contact += (
-                                        f" <{_em.group(1)}>")
+                                        f" <{_em.group(1).strip()}>")
                                 break
                         except Exception:
                             pass
-                # pyproject.toml [[project.authors]]
+                # pyproject.toml authors (inline array or [[project.authors]])
                 if not _upstream_contact and os.path.isfile(
                         "pyproject.toml"):
                     try:
                         with open("pyproject.toml", encoding="utf-8",
                                   errors="replace") as _pf:
                             _ptxt = _pf.read()
+                        # Try inline array: authors = [{name = "...", ...}]
                         _pm = re.search(
-                            r'\[\[project\.authors\]\]\s*\n'
-                            r'\s*name\s*=\s*"(.+?)"',
+                            r'authors\s*=\s*\[\s*\{[^}]*'
+                            r'name\s*=\s*"(.+?)"',
                             _ptxt)
                         if _pm:
                             _upstream_contact = _pm.group(1)
                             _pe = re.search(
-                                r'\[\[project\.authors\]\]\s*\n'
-                                r'[^\[]*?email\s*=\s*"(.+?)"',
+                                r'authors\s*=\s*\[\s*\{[^}]*'
+                                r'email\s*=\s*"(.+?)"',
                                 _ptxt)
                             if _pe:
                                 _upstream_contact += (
                                     f" <{_pe.group(1)}>")
+                        else:
+                            # Try table-array: [[project.authors]]
+                            _pm = re.search(
+                                r'\[\[project\.authors\]\]\s*\n'
+                                r'\s*name\s*=\s*"(.+?)"',
+                                _ptxt)
+                            if _pm:
+                                _upstream_contact = _pm.group(1)
+                                _pe = re.search(
+                                    r'\[\[project\.authors\]\]'
+                                    r'\s*\n[^\[]*?'
+                                    r'email\s*=\s*"(.+?)"',
+                                    _ptxt)
+                                if _pe:
+                                    _upstream_contact += (
+                                        f" <{_pe.group(1)}>")
                     except Exception:
                         pass
                 # package.json "author"
@@ -4676,14 +4703,40 @@ else:
             if not _upstream_contact:
                 _upstream_contact = _packager_contact
 
-            # Fill in Source: TODO
-            if re.search(r'^Source:\s*TODO\s*$', _hdr, re.MULTILINE):
+            # Fill in Source: TODO or FIXME
+            if re.search(r'^Source:\s*(TODO|FIXME)\s*$', _hdr,
+                         re.MULTILINE):
                 if _upstream_source:
-                    _hdr = re.sub(r'^Source:\s*TODO\s*$',
-                                  f'Source: {_upstream_source}',
-                                  _hdr, flags=re.MULTILINE)
+                    _hdr = re.sub(
+                        r'^Source:\s*(TODO|FIXME)\s*$',
+                        f'Source: {_upstream_source}',
+                        _hdr, flags=re.MULTILINE)
                     _hdr_changed = True
                     print(f"  Filled Source: {_upstream_source}")
+
+            # Fill in Upstream-Name: FIXME
+            if re.search(r'^Upstream-Name:\s*FIXME\s*$', _hdr,
+                         re.MULTILINE):
+                if _upstream_name:
+                    _hdr = re.sub(
+                        r'^Upstream-Name:\s*FIXME\s*$',
+                        f'Upstream-Name: {_upstream_name}',
+                        _hdr, flags=re.MULTILINE)
+                    _hdr_changed = True
+                    print(f"  Filled Upstream-Name: {_upstream_name}")
+
+            # Fill in Upstream-Contact: FIXME
+            if re.search(r'^Upstream-Contact:\s*FIXME\s*$', _hdr,
+                         re.MULTILINE):
+                if _upstream_contact:
+                    _hdr = re.sub(
+                        r'^Upstream-Contact:\s*FIXME\s*$',
+                        f'Upstream-Contact: {_upstream_contact}',
+                        _hdr, flags=re.MULTILINE)
+                    _hdr_changed = True
+                    print(
+                        f"  Filled Upstream-Contact: "
+                        f"{_upstream_contact}")
 
             # Add missing Upstream-Name
             if "Upstream-Name:" not in _hdr and _upstream_name:
