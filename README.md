@@ -10,6 +10,7 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **License mismatch detection**: scanner results vs. declared stanzas
 - **Copyright holder auditing**: missing/extra authors with fuzzy matching, Unicode name preservation, and DEP-5-aware `Files: *` handling (proposes precise stanzas instead of polluting the catch-all)
 - **License text completeness**: verifies License blocks have full text
+- **Upstream author inference**: determines project author from GitHub API (owner profile), package metadata (`setup.py`, `pyproject.toml`, `package.json`), or git history — the debian/control Maintainer (packager) is used only as a last resort
 - **Automatic license fetching**: from SPDX and Creative Commons APIs
 - **Non-free / DFSG detection**: SSPL, BUSL, CC-NC, CC-ND, and more
 - **Coverage analysis**: uncovered files, stale globs, and superfluous stanza detection
