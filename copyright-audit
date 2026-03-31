@@ -143,11 +143,12 @@ for _pat in "${DEFAULT_EXCLUDES[@]}"; do
     EXCLUDE_PATTERNS+=("$_pat")
 done
 
-# Exclude the copyright file itself (and its .bak) from scanning to
-# prevent a feedback loop where declared holders/licenses get re-detected.
+# Exclude the copyright file itself (and derivatives like .bak, .raw)
+# from scanning to prevent a feedback loop where declared
+# holders/licenses get re-detected.
 if [[ -n "$COPYRIGHT_FILE" ]]; then
     _relcop="${COPYRIGHT_FILE#"$SRCDIR/"}"
-    EXCLUDE_PATTERNS+=("$_relcop" "${_relcop}.bak")
+    EXCLUDE_PATTERNS+=("$_relcop" "${_relcop}.*" "${_relcop}.bak")
 fi
 
 echo "=== Debian Copyright Tool ===" >&2
@@ -181,7 +182,7 @@ if [[ "$MODE" == "generate" ]] && command -v decopy >/dev/null 2>&1; then
         DECOPY_GENERATED="true"
         # Exclude the generated file from scanning to prevent feedback loop
         _relcop="${COPYRIGHT_FILE#"$SRCDIR/"}"
-        EXCLUDE_PATTERNS+=("$_relcop" "${_relcop}.bak")
+        EXCLUDE_PATTERNS+=("$_relcop" "${_relcop}.*" "${_relcop}.bak")
     else
         echo "decopy produced no output; falling back to built-in generator." >&2
         rm -f "$_GEN_TARGET"
@@ -654,7 +655,9 @@ _METADATA_GLOBS = (
     "licenses/*",
 )
 _METADATA_BASENAMES = frozenset({
-    "AUTHORS", "COPYING", "COPYING.txt", "NEWS", "README", "README.md",
+    "AUTHORS", "COPYING", "COPYING.txt", "LICENSE", "LICENSE.txt",
+    "LICENSE.md", "LICENCE", "LICENCE.txt",
+    "NEWS", "README", "README.md",
     "ChangeLog", "POTFILES.in",
 })
 
@@ -706,19 +709,27 @@ SPDX_TO_DEP5 = {
     # MPL
     "mpl-1.1": "MPL-1.1", "mpl-2.0": "MPL-2.0",
     # Creative Commons (all versions 1.0 through 4.0)
+    # Include versionless aliases (e.g. "cc-by-sa-3" → "CC-BY-SA-3.0")
+    # because decopy and other tools sometimes omit the trailing ".0".
     "cc0-1.0": "CC0-1.0", "cc-pddc": "CC-PDDC",
     "cc-by-1.0": "CC-BY-1.0", "cc-by-2.0": "CC-BY-2.0",
     "cc-by-2.5": "CC-BY-2.5", "cc-by-3.0": "CC-BY-3.0", "cc-by-4.0": "CC-BY-4.0",
+    "cc-by-1": "CC-BY-1.0", "cc-by-2": "CC-BY-2.0", "cc-by-3": "CC-BY-3.0", "cc-by-4": "CC-BY-4.0",
     "cc-by-sa-1.0": "CC-BY-SA-1.0", "cc-by-sa-2.0": "CC-BY-SA-2.0",
     "cc-by-sa-2.5": "CC-BY-SA-2.5", "cc-by-sa-3.0": "CC-BY-SA-3.0", "cc-by-sa-4.0": "CC-BY-SA-4.0",
+    "cc-by-sa-1": "CC-BY-SA-1.0", "cc-by-sa-2": "CC-BY-SA-2.0", "cc-by-sa-3": "CC-BY-SA-3.0", "cc-by-sa-4": "CC-BY-SA-4.0",
     "cc-by-nc-1.0": "CC-BY-NC-1.0", "cc-by-nc-2.0": "CC-BY-NC-2.0",
     "cc-by-nc-2.5": "CC-BY-NC-2.5", "cc-by-nc-3.0": "CC-BY-NC-3.0", "cc-by-nc-4.0": "CC-BY-NC-4.0",
+    "cc-by-nc-1": "CC-BY-NC-1.0", "cc-by-nc-2": "CC-BY-NC-2.0", "cc-by-nc-3": "CC-BY-NC-3.0", "cc-by-nc-4": "CC-BY-NC-4.0",
     "cc-by-nd-1.0": "CC-BY-ND-1.0", "cc-by-nd-2.0": "CC-BY-ND-2.0",
     "cc-by-nd-2.5": "CC-BY-ND-2.5", "cc-by-nd-3.0": "CC-BY-ND-3.0", "cc-by-nd-4.0": "CC-BY-ND-4.0",
+    "cc-by-nd-1": "CC-BY-ND-1.0", "cc-by-nd-2": "CC-BY-ND-2.0", "cc-by-nd-3": "CC-BY-ND-3.0", "cc-by-nd-4": "CC-BY-ND-4.0",
     "cc-by-nc-sa-1.0": "CC-BY-NC-SA-1.0", "cc-by-nc-sa-2.0": "CC-BY-NC-SA-2.0",
     "cc-by-nc-sa-2.5": "CC-BY-NC-SA-2.5", "cc-by-nc-sa-3.0": "CC-BY-NC-SA-3.0", "cc-by-nc-sa-4.0": "CC-BY-NC-SA-4.0",
+    "cc-by-nc-sa-1": "CC-BY-NC-SA-1.0", "cc-by-nc-sa-2": "CC-BY-NC-SA-2.0", "cc-by-nc-sa-3": "CC-BY-NC-SA-3.0", "cc-by-nc-sa-4": "CC-BY-NC-SA-4.0",
     "cc-by-nc-nd-1.0": "CC-BY-NC-ND-1.0", "cc-by-nc-nd-2.0": "CC-BY-NC-ND-2.0",
     "cc-by-nc-nd-2.5": "CC-BY-NC-ND-2.5", "cc-by-nc-nd-3.0": "CC-BY-NC-ND-3.0", "cc-by-nc-nd-4.0": "CC-BY-NC-ND-4.0",
+    "cc-by-nc-nd-1": "CC-BY-NC-ND-1.0", "cc-by-nc-nd-2": "CC-BY-NC-ND-2.0", "cc-by-nc-nd-3": "CC-BY-NC-ND-3.0", "cc-by-nc-nd-4": "CC-BY-NC-ND-4.0",
     # GFDL family
     "gfdl-1.1-only": "GFDL-1.1", "gfdl-1.1-or-later": "GFDL-1.1+",
     "gfdl-1.1": "GFDL-1.1", "gfdl-1.1+": "GFDL-1.1+",
@@ -1383,13 +1394,13 @@ for _r in scan_results:
         _dir_copyrights[_d].add(_c)
 
 def _dir_has_license_file(d):
-    """Return True if directory *d* or its parent has a COPYING/LICENSE file."""
-    if d in _dirs_with_license_file:
-        return True
-    parent = str(Path(d).parent)
-    if parent != d and parent in _dirs_with_license_file:
-        return True
-    return False
+    """Return True if directory *d* itself contains a COPYING/LICENSE file.
+
+    The root directory's LICENSE describes the overall project license
+    (already captured by Files: *), so we do NOT check parent directories.
+    Files in subdirectories without their own LICENSE fall through to the
+    catch-all stanza rather than inheriting from directory peers."""
+    return d in _dirs_with_license_file and d != "."
 
 def dir_dominant_license(d):
     """Return the most common license tuple for directory *d*.
@@ -3390,15 +3401,18 @@ if len(all_sanity_results) >= 2:
                 raw = _sr.get(fp.lstrip("./"), _sr.get(fp, set()))
                 tool_lics[_st] = set(to_dep5(l) for l in raw if l) if raw else set()
 
-            # Compare families pairwise to find which tools agree
+            # Compare families pairwise to find which tools agree.
+            # Tools that returned no detection abstain — they do not
+            # count as disagreements.
             tools = list(tool_lics.keys())
+            _active_tools = [t for t in tools if tool_lics[t]]
             _agreements = []
-            for i in range(len(tools)):
-                for j in range(i + 1, len(tools)):
-                    fi = {_family(l) for l in tool_lics[tools[i]] if l}
-                    fj = {_family(l) for l in tool_lics[tools[j]] if l}
-                    if fi and fj and (fi & fj):
-                        _agreements.append((tools[i], tools[j]))
+            for i in range(len(_active_tools)):
+                for j in range(i + 1, len(_active_tools)):
+                    fi = {_family(l) for l in tool_lics[_active_tools[i]] if l}
+                    fj = {_family(l) for l in tool_lics[_active_tools[j]] if l}
+                    if fi & fj:
+                        _agreements.append((_active_tools[i], _active_tools[j]))
 
             if _agreements:
                 # At least two tools agree — pick the consensus license
@@ -3407,8 +3421,11 @@ if len(all_sanity_results) >= 2:
                     tool_lics[_winner_pair[0]] & tool_lics[_winner_pair[1]]
                 )) or ", ".join(sorted(tool_lics[_winner_pair[0]]))
                 sanity_consensus.append((fp, tool_lics, _consensus))
-            else:
+            elif len(_active_tools) >= 2:
+                # Two or more tools detected something but none agree
                 sanity_real_disc.append((fp, tool_lics))
+            # else: only one (or zero) tools detected anything — no
+            # consensus possible but not a real disagreement either
 
 real_mismatches = defaultdict(list)
 fp_mismatches = defaultdict(list)
@@ -4512,10 +4529,15 @@ else:
             _hdr = _hdr_paras[0]
             _hdr_changed = False
 
-            # Infer upstream name from debian/control or directory name
+            # Infer upstream name/contact/source from multiple sources.
+            # Priority for Upstream-Contact:
+            #   1. GitHub/GitLab API (if Homepage is a forge URL)
+            #   2. Package metadata (setup.py, pyproject.toml, package.json, etc.)
+            #   3. Maintainer from debian/control (last resort — usually packager)
             _upstream_name = ""
             _upstream_contact = ""
             _upstream_source = ""
+            _packager_contact = ""   # debian/control Maintainer (packager)
 
             for _ctrl_path in ("debian/control",):
                 if os.path.isfile(_ctrl_path):
@@ -4530,13 +4552,129 @@ else:
                                 _upstream_source = _upstream_source or \
                                     _cl[9:].strip()
                             if _cl.startswith("Maintainer:"):
-                                _upstream_contact = _upstream_contact or \
-                                    _cl[11:].strip()
+                                _packager_contact = _packager_contact \
+                                    or _cl[11:].strip()
 
             # Fallback: directory name
             if not _upstream_name:
                 _upstream_name = os.path.basename(
                     os.environ.get("SRCDIR", "."))
+
+            # ── Infer upstream contact from forge API ────────────────
+            _gh_author_name = ""
+            _gh_author_email = ""
+            _gh_created_year = ""
+            _gh_m = re.match(
+                r'https?://github\.com/([^/]+)/([^/]+?)'
+                r'(?:\.git)?/?$',
+                _upstream_source) if _upstream_source else None
+            if _gh_m:
+                _gh_owner, _gh_repo = _gh_m.group(1), _gh_m.group(2)
+                try:
+                    _gh_url = (f"https://api.github.com/repos/"
+                               f"{_gh_owner}/{_gh_repo}")
+                    _gh_req = Request(_gh_url)
+                    _gh_req.add_header(
+                        "Accept", "application/vnd.github.v3+json")
+                    with urlopen(_gh_req, timeout=10) as _gh_resp:
+                        _gh_data = json.loads(_gh_resp.read())
+                    _gh_created_year = _gh_data.get(
+                        "created_at", "")[:4]
+                    _gh_owner_url = _gh_data.get(
+                        "owner", {}).get("url", "")
+                    if _gh_owner_url:
+                        _gh_req2 = Request(_gh_owner_url)
+                        _gh_req2.add_header(
+                            "Accept", "application/vnd.github.v3+json")
+                        with urlopen(_gh_req2,
+                                     timeout=10) as _gh_resp2:
+                            _gh_udata = json.loads(
+                                _gh_resp2.read())
+                        _gh_author_name = (
+                            _gh_udata.get("name")
+                            or _gh_udata.get("login", ""))
+                        _gh_author_email = (
+                            _gh_udata.get("email") or "")
+                    if not _gh_author_name:
+                        _gh_author_name = _gh_owner
+                except Exception:
+                    pass
+
+            if _gh_author_name:
+                if _gh_author_email:
+                    _upstream_contact = (
+                        f"{_gh_author_name} <{_gh_author_email}>")
+                else:
+                    _upstream_contact = _gh_author_name
+
+            # ── Infer from package metadata files ────────────────────
+            if not _upstream_contact:
+                # setup.py: author = "..."
+                for _meta in ("setup.py", "setup.cfg"):
+                    if os.path.isfile(_meta):
+                        try:
+                            with open(_meta, encoding="utf-8",
+                                      errors="replace") as _mf:
+                                _mtxt = _mf.read()
+                            _am = re.search(
+                                r'''(?:^|\n)\s*author\s*=\s*['"](.+?)['"]''',
+                                _mtxt)
+                            _em = re.search(
+                                r'''(?:^|\n)\s*author_email\s*=\s*['"](.+?)['"]''',
+                                _mtxt)
+                            if _am:
+                                _upstream_contact = _am.group(1)
+                                if _em:
+                                    _upstream_contact += (
+                                        f" <{_em.group(1)}>")
+                                break
+                        except Exception:
+                            pass
+                # pyproject.toml [[project.authors]]
+                if not _upstream_contact and os.path.isfile(
+                        "pyproject.toml"):
+                    try:
+                        with open("pyproject.toml", encoding="utf-8",
+                                  errors="replace") as _pf:
+                            _ptxt = _pf.read()
+                        _pm = re.search(
+                            r'\[\[project\.authors\]\]\s*\n'
+                            r'\s*name\s*=\s*"(.+?)"',
+                            _ptxt)
+                        if _pm:
+                            _upstream_contact = _pm.group(1)
+                            _pe = re.search(
+                                r'\[\[project\.authors\]\]\s*\n'
+                                r'[^\[]*?email\s*=\s*"(.+?)"',
+                                _ptxt)
+                            if _pe:
+                                _upstream_contact += (
+                                    f" <{_pe.group(1)}>")
+                    except Exception:
+                        pass
+                # package.json "author"
+                if not _upstream_contact and os.path.isfile(
+                        "package.json"):
+                    try:
+                        with open("package.json", encoding="utf-8",
+                                  errors="replace") as _jf:
+                            _jdata = json.loads(_jf.read())
+                        _jauth = _jdata.get("author")
+                        if isinstance(_jauth, dict):
+                            _upstream_contact = _jauth.get("name", "")
+                            if _jauth.get("email"):
+                                _upstream_contact += (
+                                    f" <{_jauth['email']}>")
+                        elif isinstance(_jauth, str) and _jauth:
+                            _upstream_contact = _jauth
+                    except Exception:
+                        pass
+                # CMakeLists.txt project(... VERSION ...) — author not
+                # typically there, but DESCRIPTION might help; skip.
+
+            # ── Last resort: packager from debian/control ────────────
+            if not _upstream_contact:
+                _upstream_contact = _packager_contact
 
             # Fill in Source: TODO
             if re.search(r'^Source:\s*TODO\s*$', _hdr, re.MULTILINE):
@@ -4562,7 +4700,7 @@ else:
                     _hdr = re.sub(
                         r'^(Upstream-Name:[^\n]*)',
                         rf'\1\nUpstream-Contact: {_upstream_contact}',
-                        _hdr, count=1)
+                        _hdr, count=1, flags=re.MULTILINE)
                 else:
                     _hdr = re.sub(
                         r'^(Format:[^\n]*)',
@@ -4638,6 +4776,112 @@ else:
             changes_made += 1
             print(f"  Removed FSF boilerplate copyright from "
                   f"{_0c_count} GPL-family stanza(s).\n")
+
+        # ── Fix 0c2: Add missing Copyright to Files stanzas ──────────
+        # Decopy sometimes emits Files stanzas without a Copyright:
+        # field.  For Files: *, infer holders from scanner data for
+        # root-level files; for others, use the scanner data for the
+        # stanza's file paths.  Falls back to packager identity.
+        _0c2_paras = working_text.split("\n\n")
+        _0c2_count = 0
+        for _pi, _para in enumerate(_0c2_paras):
+            if not re.match(r'^\s*Files:', _para):
+                continue
+            if re.search(r'^Copyright:', _para, re.MULTILINE):
+                continue  # already has Copyright
+            # Extract file patterns from this stanza
+            _stanza_lines = _para.split("\n")
+            _stanza_files = []
+            _files_end = 0
+            for _li, _line in enumerate(_stanza_lines):
+                if _line.startswith("Files:"):
+                    rest = _line[6:].strip()
+                    if rest:
+                        _stanza_files.extend(rest.split())
+                    _files_end = _li + 1
+                elif _files_end and _line.startswith("       "):
+                    _stanza_files.extend(_line.strip().split())
+                    _files_end = _li + 1
+                else:
+                    break
+
+            is_catchall = _stanza_files == ["*"]
+
+            # Gather copyright holders from scanner data
+            _inferred_cops = []
+            _fsf_re_0c2 = re.compile(
+                r'free\s+software\s+foundation', re.IGNORECASE)
+            for r in scan_results:
+                fp = r["path"].lstrip("./")
+                # Check if this file is governed by the stanza
+                governed = False
+                if is_catchall:
+                    # For *, use root-level files (no subdirectory)
+                    governed = "/" not in fp
+                else:
+                    for pat in _stanza_files:
+                        if fnmatch.fnmatch(fp, pat):
+                            governed = True
+                            break
+                if not governed:
+                    continue
+                # Check if stanza's license is GPL-family
+                _lic_m = re.search(r'^License:\s*(.+)', _para,
+                                   re.MULTILINE)
+                _is_gpl_0c2 = bool(
+                    _lic_m and re.search(
+                        r'\b(GPL|LGPL|AGPL|GFDL)\b',
+                        _lic_m.group(1), re.IGNORECASE))
+                for c in r.get("copyrights", []):
+                    if c and not (_is_gpl_0c2
+                                  and _fsf_re_0c2.search(c)):
+                        _inferred_cops.append(c)
+
+            merged = merge_copyrights(_inferred_cops)
+            if not merged and is_catchall:
+                # For Files: *, try to use the upstream author inferred
+                # by Fix 0b (GitHub API, package metadata, etc.).
+                if _gh_author_name:
+                    _yr = _gh_created_year or ""
+                    if _yr:
+                        merged = [f"{_yr} {_gh_author_name}"]
+                    else:
+                        merged = [_gh_author_name]
+                    print(f"  Inferred Files: * copyright from "
+                          f"upstream: {merged[0]}")
+                elif _upstream_contact and \
+                        _upstream_contact != _packager_contact:
+                    # Use upstream contact (from metadata), not packager
+                    merged = [_upstream_contact]
+                    print(f"  Inferred Files: * copyright from "
+                          f"upstream metadata: {merged[0]}")
+            if not merged:
+                # Fallback: packager identity
+                _fb_parts = []
+                if packager_year:
+                    _fb_parts.append(packager_year)
+                if packager_name:
+                    _fb_parts.append(packager_name)
+                if packager_email:
+                    _fb_parts.append(f"<{packager_email}>")
+                if _fb_parts:
+                    merged = [" ".join(_fb_parts)]
+            if not merged:
+                continue
+
+            cop_field = format_copyright_field(merged)
+            # Insert Copyright: after the Files: block
+            new_lines = (_stanza_lines[:_files_end]
+                         + [f"Copyright: {cop_field}"]
+                         + _stanza_lines[_files_end:])
+            _0c2_paras[_pi] = "\n".join(new_lines)
+            _0c2_count += 1
+
+        if _0c2_count:
+            working_text = "\n\n".join(_0c2_paras)
+            changes_made += 1
+            print(f"  Added missing Copyright field to "
+                  f"{_0c2_count} stanza(s).\n")
 
         # ── Fix 0d: Remove license text files from Files stanzas ─────
         # Whole license text files (e.g. LICENSES/*.txt, COPYING, etc.)
@@ -4853,7 +5097,6 @@ else:
                             _stanza_mismatches[key]["decl"] = decl
                             _stanza_mismatches[key]["files"].append(f)
                             break
-
             fix1c_count = 0
             for (glob_pat, det, decl), info in sorted(_stanza_mismatches.items()):
                 # Check if cross-validation supports the primary scanner
@@ -5325,11 +5568,12 @@ else:
                 new_paras.append(replacement)
                 fix3b_count += 1
             elif not no_fetch:
-                fetched = fetch_license_text(lic_name)
+                norm_name = to_dep5(lic_name)
+                fetched = fetch_license_text(norm_name)
                 if fetched:
                     body_fmt = format_license_body(fetched)
-                    replacement = f"License: {lic_name}\n{body_fmt}"
-                    print(f"  Fixing empty '{lic_name}' block → "
+                    replacement = f"License: {norm_name}\n{body_fmt}"
+                    print(f"  Fixing empty '{norm_name}' block → "
                           f"fetched from SPDX/CC")
                     new_paras.append(replacement)
                     fix3b_count += 1
@@ -5967,6 +6211,109 @@ else:
         if fix7_count:
             changes_made += 1
             print(f"Normalized copyright lines in {fix7_count} stanza(s).\n")
+
+        # ── Fix 7b: Normalize license names ──────────────────────────
+        # Decopy and other tools sometimes emit non-canonical license
+        # names (e.g. "CC-BY-SA-3" instead of "CC-BY-SA-3.0").
+        # Normalize all License: fields in both Files stanzas and
+        # standalone License blocks using to_dep5().
+        fix7b_count = 0
+        new_paras = []
+        for para in working_text.split("\n\n"):
+            plines = para.split("\n")
+            changed = False
+            new_lines = []
+            for line in plines:
+                if line.startswith("License:"):
+                    lic_val = line[8:].strip()
+                    lic_name = lic_val.split()[0] if lic_val else None
+                    if lic_name:
+                        norm = to_dep5(lic_name)
+                        if norm != lic_name:
+                            line = "License: " + norm + lic_val[len(lic_name):]
+                            changed = True
+                new_lines.append(line)
+            if changed:
+                fix7b_count += 1
+            new_paras.append("\n".join(new_lines))
+        if fix7b_count:
+            working_text = "\n\n".join(new_paras)
+            changes_made += 1
+            print(f"Normalized license names in {fix7b_count} paragraph(s).\n")
+
+        # ── Fix 7c: Strip stale "No explicit license found" comments ─
+        # Decopy adds "Comment: No explicit license found, using
+        # license(s) from: ..." when a file inherits its license from
+        # a nearby LICENSE/COPYING file.  Once the license is resolved,
+        # this comment is noise.
+        fix7c_count = 0
+        new_paras = []
+        for para in working_text.split("\n\n"):
+            plines = para.split("\n")
+            has_license = any(
+                l.startswith("License:") and l[8:].strip()
+                and l[8:].strip().split()[0] not in ("UNKNOWN", "FIXME")
+                for l in plines)
+            if not has_license:
+                new_paras.append(para)
+                continue
+            # Remove Comment: block about inherited license
+            filtered = []
+            skip_cont = False
+            for line in plines:
+                if line.startswith("Comment:") and "no explicit license found" in line.lower():
+                    skip_cont = True
+                    continue
+                if skip_cont and line.startswith(" ") and line.strip():
+                    continue
+                skip_cont = False
+                filtered.append(line)
+            if len(filtered) < len(plines):
+                fix7c_count += 1
+                new_paras.append("\n".join(filtered))
+            else:
+                new_paras.append(para)
+        if fix7c_count:
+            working_text = "\n\n".join(new_paras)
+            changes_made += 1
+            print(f"Removed stale 'No explicit license found' comment "
+                  f"from {fix7c_count} stanza(s).\n")
+
+        # ── Fix 7d: Remove orphaned standalone License blocks ────────
+        # After stanza license corrections (Fix 1c) or consolidation
+        # (Fix 6), standalone License: blocks may remain that are no
+        # longer referenced by any Files stanza.
+        _referenced_lics = set()
+        for para in working_text.split("\n\n"):
+            plines = para.strip().split("\n")
+            has_files = any(l.strip().startswith("Files:") for l in plines)
+            if has_files:
+                for l in plines:
+                    if l.startswith("License:"):
+                        lic = l[8:].strip().split()[0] if l[8:].strip() else None
+                        if lic:
+                            _referenced_lics.add(lic)
+
+        fix7d_count = 0
+        new_paras = []
+        for para in working_text.split("\n\n"):
+            plines = para.strip().split("\n")
+            if not plines:
+                new_paras.append(para)
+                continue
+            first = plines[0]
+            has_files = any(l.strip().startswith("Files:") for l in plines)
+            if first.startswith("License:") and not has_files:
+                lic_name = first[8:].strip().split()[0] if first[8:].strip() else None
+                if lic_name and lic_name not in _referenced_lics:
+                    fix7d_count += 1
+                    print(f"  Removed orphaned License block: {lic_name}")
+                    continue
+            new_paras.append(para)
+        if fix7d_count:
+            working_text = "\n\n".join(new_paras)
+            changes_made += 1
+            print()
 
         # ── Fix 8: Replace inline license text for common licenses ───
         # When a Files stanza has the full license body inline and
