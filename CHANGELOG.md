@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 ## 2026-03-30
 
 ### Added
+- Fix 0b upstream author inference — Upstream-Contact is now inferred
+  from the project's source forge (GitHub API owner profile), package
+  metadata files (setup.py, setup.cfg, pyproject.toml, package.json),
+  or git history, in that order. The debian/control Maintainer
+  (packager) is used only as a last resort, since the packager is
+  typically not the upstream author
+- Fix 0c2: add missing Copyright to Files stanzas — when decopy emits
+  a Files stanza without a Copyright field, infers holders from
+  scanner data; for Files: *, queries the upstream source forge
+  (GitHub API repo owner + creation year) or package metadata before
+  falling back to packager identity
+- Fix 0b re.MULTILINE fix — the Upstream-Contact insertion regex now
+  uses `re.MULTILINE` so it correctly matches `Upstream-Name:` on
+  lines other than the first
+- Exclude `debian/copyright.*` from scanning — the bash exclusion
+  patterns now cover `debian/copyright.*` (not just `.bak`), preventing
+  stale test artifacts like `copyright.raw` from polluting scanner
+  results and leaking foreign copyright holders into debian/* stanzas
 - Fix 1c: cross-validation-backed license correction — when a specific
   stanza declares the wrong license (e.g. decopy said MIT-open-group
   but scancode detected HPND-sell-variant), Fix 1c consults the
