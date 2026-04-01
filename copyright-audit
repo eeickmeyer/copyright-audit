@@ -37,6 +37,7 @@
 #   --export FILE          Export full review findings to FILE (review mode)
 #   --no-fetch              Don't download license text from SPDX/CC (use FIXME stubs)
 #   -j, --jobs N            Parallel scancode workers (default: nproc)
+#   --cache-dir DIR         Reuse scan results from DIR (skip scanning if present)
 #   -h, --help              Show this help
 #
 # Scanner preference (automatic):
@@ -59,6 +60,7 @@ FIX_MODE=false
 YES_MODE=false
 NO_FETCH=false
 JOBS=""
+CACHE_DIR=""
 SRCDIR=""
 
 show_help() {
@@ -87,6 +89,9 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true; shift ;;
         --no-fetch)
             NO_FETCH=true; shift ;;
+        --cache-dir)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
+            CACHE_DIR="$2"; shift 2 ;;
         -j|--jobs)
             [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
             if ! [[ "$2" =~ ^[0-9]+$ ]]; then
@@ -122,6 +127,36 @@ if [[ "$MODE" != "generate" ]]; then
         echo "  Use 'generate' mode to create one, or run from a debian source tree." >&2
         exit 1
     fi
+    # Detect pre-DEP-5 (non-machine-readable) copyright files.
+    # DEP-5 files must start with "Format:" in the first paragraph.
+    _first_line="$(head -1 "$COPYRIGHT_FILE")"
+    if [[ ! "$_first_line" =~ ^Format: ]]; then
+        echo "Warning: $COPYRIGHT_FILE is not in DEP-5 machine-readable format." >&2
+        echo "  (First line should be 'Format: https://...', found: '${_first_line:0:60}')" >&2
+        echo "" >&2
+        echo "  This appears to be a pre-DEP-5 free-text copyright file." >&2
+        echo "  It must be regenerated in DEP-5 format for copyright-audit to work." >&2
+        echo "" >&2
+        if [[ "$FIX_MODE" == "true" ]]; then
+            if [[ "$YES_MODE" == "true" ]]; then
+                _regen_answer="y"
+            else
+                printf "  Regenerate debian/copyright from scratch? [y/N] " >&2
+                read -r _regen_answer
+            fi
+            if [[ "$_regen_answer" =~ ^[Yy] ]]; then
+                echo "  Switching to generate mode..." >&2
+                MODE="generate"
+                COPYRIGHT_FILE=""
+            else
+                echo "  Cannot proceed with a non-DEP-5 file. Exiting." >&2
+                exit 1
+            fi
+        else
+            echo "  Re-run with --fix to regenerate, or use 'generate' mode directly." >&2
+            exit 1
+        fi
+    fi
 else
     COPYRIGHT_FILE=""
 fi
@@ -145,8 +180,15 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-_WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$_WORKDIR"' EXIT
+if [[ -n "$CACHE_DIR" ]]; then
+    mkdir -p "$CACHE_DIR"
+    _WORKDIR="$(cd "$CACHE_DIR" && pwd)"
+    # Don't delete the cache dir on exit
+    trap '' EXIT
+else
+    _WORKDIR="$(mktemp -d)"
+    trap 'rm -rf "$_WORKDIR"' EXIT
+fi
 
 # ── Default exclusions for VCS / build artifacts ─────────────────────
 DEFAULT_EXCLUDES=(".git" ".git/*" ".svn" ".svn/*" ".hg" ".hg/*"
@@ -203,25 +245,31 @@ if [[ "$MODE" == "generate" ]] && command -v decopy >/dev/null 2>&1; then
 fi
 
 if [[ "$SCANNER" == "scancode" ]]; then
-    echo "Running ScanCode (SPDX database)... this may take several minutes." >&2
-    SC_ARGS=(--license --copyright --json "$_WORKDIR/scancode.json")
-    if [[ -n "$JOBS" ]]; then
-        SC_ARGS+=(-n "$JOBS")
-    fi
-    # Pass exclude patterns to scancode for early filtering
-    for _pat in "${EXCLUDE_PATTERNS[@]}"; do
-        SC_ARGS+=(--ignore "$_pat")
-    done
-    # ScanCode needs a real TTY on stderr for its progress bar.
-    # Let stderr go straight to the terminal; capture exit status only.
-    scancode "${SC_ARGS[@]}" . && _sc_rc=0 || _sc_rc=$?
-    if [[ $_sc_rc -ne 0 ]]; then
-        echo "Warning: ScanCode exited with code $_sc_rc. Results may be incomplete." >&2
+    if [[ -n "$CACHE_DIR" && -s "$_WORKDIR/scancode.json" ]]; then
+        echo "Using cached ScanCode results from $CACHE_DIR" >&2
+    else
+        echo "Running ScanCode (SPDX database)... this may take several minutes." >&2
+        SC_ARGS=(--license --copyright --json "$_WORKDIR/scancode.json")
+        if [[ -n "$JOBS" ]]; then
+            SC_ARGS+=(-n "$JOBS")
+        fi
+        # Pass exclude patterns to scancode for early filtering
+        for _pat in "${EXCLUDE_PATTERNS[@]}"; do
+            SC_ARGS+=(--ignore "$_pat")
+        done
+        # ScanCode needs a real TTY on stderr for its progress bar.
+        # Let stderr go straight to the terminal; capture exit status only.
+        scancode "${SC_ARGS[@]}" . && _sc_rc=0 || _sc_rc=$?
+        if [[ $_sc_rc -ne 0 ]]; then
+            echo "Warning: ScanCode exited with code $_sc_rc. Results may be incomplete." >&2
+        fi
     fi
     SCAN_FILE="$_WORKDIR/scancode.json"
 
     # Run licensecheck as a sanity check if available
-    if command -v licensecheck >/dev/null 2>&1; then
+    if [[ -n "$CACHE_DIR" && -s "$_WORKDIR/licensecheck_sanity.txt" ]]; then
+        echo "Using cached licensecheck sanity results from $CACHE_DIR" >&2
+    elif command -v licensecheck >/dev/null 2>&1; then
         echo "Running licensecheck as sanity check..." >&2
         licensecheck -r --deb-machine . 2>/dev/null \
             | sed 's/[\x00-\x08\x0e-\x1f]//g' \
@@ -231,7 +279,9 @@ if [[ "$SCANNER" == "scancode" ]]; then
     # Run decopy as a sanity check if available and in check/review mode.
     # When decopy generated the file we still run it in --mode full so
     # cross-validation data is available for Fix 1c.
-    if [[ "$MODE" != "generate" ]] \
+    if [[ -n "$CACHE_DIR" && -s "$_WORKDIR/decopy.txt" ]]; then
+        echo "Using cached decopy results from $CACHE_DIR" >&2
+    elif [[ "$MODE" != "generate" ]] \
        && command -v decopy >/dev/null 2>&1 \
        && [[ -n "$COPYRIGHT_FILE" ]]; then
         echo "Running decopy as sanity check..." >&2
@@ -239,19 +289,25 @@ if [[ "$SCANNER" == "scancode" ]]; then
             > "$_WORKDIR/decopy.txt" || true
     fi
 else
-    echo "Running licensecheck..." >&2
-    if ! licensecheck -r --deb-machine . 2>"$_WORKDIR/licensecheck.err" \
-        | sed 's/[\x00-\x08\x0e-\x1f]//g' \
-        > "$_WORKDIR/licensecheck.txt"; then
-        echo "Warning: licensecheck exited with errors. Results may be incomplete." >&2
-        head -20 "$_WORKDIR/licensecheck.err" >&2
+    if [[ -n "$CACHE_DIR" && -s "$_WORKDIR/licensecheck.txt" ]]; then
+        echo "Using cached licensecheck results from $CACHE_DIR" >&2
+    else
+        echo "Running licensecheck..." >&2
+        if ! licensecheck -r --deb-machine . 2>"$_WORKDIR/licensecheck.err" \
+            | sed 's/[\x00-\x08\x0e-\x1f]//g' \
+            > "$_WORKDIR/licensecheck.txt"; then
+            echo "Warning: licensecheck exited with errors. Results may be incomplete." >&2
+            head -20 "$_WORKDIR/licensecheck.err" >&2
+        fi
     fi
     SCAN_FILE="$_WORKDIR/licensecheck.txt"
 
     # Also run decopy if available and in check/review mode
     # When decopy generated the file we still run it as a sanity check
     # in --mode full so cross-validation data is available for Fix 1c.
-    if [[ "$MODE" != "generate" ]] \
+    if [[ -n "$CACHE_DIR" && -s "$_WORKDIR/decopy.txt" ]]; then
+        echo "Using cached decopy results from $CACHE_DIR" >&2
+    elif [[ "$MODE" != "generate" ]] \
        && command -v decopy >/dev/null 2>&1; then
         echo "Running decopy as sanity check..." >&2
         decopy --mode full --progress --copyright-file "$COPYRIGHT_FILE" . \
@@ -670,6 +726,7 @@ _METADATA_GLOBS = (
 _METADATA_BASENAMES = frozenset({
     "AUTHORS", "COPYING", "COPYING.txt", "LICENSE", "LICENSE.txt",
     "LICENSE.md", "LICENCE", "LICENCE.txt",
+    "COPYRIGHT", "COPYRIGHT.txt",
     "NEWS", "README", "README.md",
     "ChangeLog", "POTFILES.in",
 })
@@ -815,6 +872,10 @@ SPDX_TO_DEP5 = {
     "cc0": "CC0-1.0",
     "cc-by-sa": "CC-BY-SA",  # kept versionless — flagged by review
     "cc-by": "CC-BY",        # kept versionless — flagged by review
+    # Creative Commons GPL wrappers (CC metadata URLs for GPL)
+    "cc-gpl-2.0": "GPL-2", "cc-gpl-2": "GPL-2",
+    "cc-gpl-3.0": "GPL-3", "cc-gpl-3": "GPL-3",
+    "cc-lgpl-2.1": "LGPL-2.1", "cc-lgpl-3.0": "LGPL-3",
 }
 
 def to_dep5(raw):
@@ -974,11 +1035,149 @@ else:
 # Skip symlinks in licensecheck results too
 scan_results = [r for r in scan_results if not os.path.islink(r["path"].lstrip("./"))]
 
+# ── Filter false-positive licenses from patch/diff files ─────────────
+# Scanners detect SPDX identifiers and license text inside diff context
+# lines (lines starting with +, -, or space in unified diffs).  These
+# belong to the file being patched, not the patch itself.  When a
+# .patch/.diff file has scanner-detected licenses but zero copyrights,
+# check whether ALL license matches fall on diff context lines; if so,
+# clear the licenses so the file falls through to Files: *.
+_PATCH_EXTS = {'.patch', '.diff'}
+for _r in scan_results:
+    _rp = _r["path"].lstrip("./")
+    if not _r["licenses"] or _r["copyrights"]:
+        continue
+    if os.path.splitext(_rp)[1].lower() not in _PATCH_EXTS:
+        continue
+    # Read the patch file and check if it looks like a unified diff
+    try:
+        with open(_rp, 'r', errors='ignore') as _pf:
+            _plines = _pf.readlines()
+    except OSError:
+        continue
+    # A unified diff has "---"/"+++" header lines
+    if not any(_l.startswith('--- ') for _l in _plines[:20]):
+        continue
+    # All reported licenses are false positives from diff context
+    # if every line in the file containing a license keyword is a
+    # diff context line (starts with +, -, or space).
+    _lic_kw_re = re.compile(
+        r'SPDX-License-Identifier|'
+        r'GNU\s+(?:General|Lesser|Affero)|'
+        r'(?:under|of)\s+the\s+(?:GNU|MIT|BSD|Apache)',
+        re.IGNORECASE)
+    _all_context = True
+    for _ln in _plines:
+        if _lic_kw_re.search(_ln):
+            # In a unified diff, context lines start with ' ',
+            # removed lines with '-', added lines with '+'.
+            # Header lines (diff, index, ---/+++) and @@ lines
+            # are not content.
+            if not (_ln[:1] in (' ', '+', '-')
+                    and not _ln.startswith('--- ')
+                    and not _ln.startswith('+++ ')):
+                _all_context = False
+                break
+    if _all_context:
+        _r["licenses"] = []
+
 # ── Filter binary-garbage copyright strings ──────────────────────────
 # licensecheck sometimes interprets binary data inside PNG/GIF/etc.
 # as copyright text, producing nonsense holders full of non-printable
 # or non-ASCII characters.  Reject those strings early.
 _PRINTABLE_RANGE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}  # tab, LF, CR
+
+# Patterns that indicate a scanner false-positive: code fragments,
+# template variables, format strings, and other non-person text that
+# happen to appear near the word "copyright" in source files.
+_CODE_FRAGMENT_RE = re.compile(
+    r'(?:'
+    # C/C++/Qt code patterns
+    r'nullptr|NULL'
+    r'|\bselect\b|\bxsl:|\bQLatin1String\b|\bQString\b'
+    r'|\barg\(|\bget\(|\bset\(|\bcreateElement\b'
+    r'|\.arg\(|\.Get\(|\.get\(|\.set\('
+    r'|->|::|\bnew\b\s+\w+\b'
+    r'|\bi18n\(|\bthis\)'
+    r'|%\d'
+    r'|\bdoc\.'
+    r'|= info\.|= t\.'
+    # DNG SDK / XMP fragments
+    r'|\bNotEmpty\b|__FILE__|__LINE__'
+    r'|\bkXMP_|\bdc:rights|\bx-default'
+    r'|\bIO\.shrink'
+    r'|\$Id[\s:]'
+    # HTML/XML fragments in copyright values
+    r'|</?(?:a|xsl)\b|"/>|</license>'
+    r'|<a\s+href='
+    # License text mistaken for holders
+    r'|\bCreative\s+Commons\b'
+    r'|\bPublic\s+Domain\b'
+    r'|\blicensed?\s+under\b'
+    r'|\bLicense:\s'
+    r'|\bBY-SA\)'
+    r'|creativecommons\.org'
+    r'|\bNo\s+Warranty\b'
+    # Bare URL as sole holder
+    r'|^https?://'
+    r')', re.IGNORECASE)
+
+# Short fragments that are clearly not a person/org name. These are
+# matched against the author portion AFTER stripping years and
+# (C)/Copyright prefixes.
+_NOT_A_HOLDER_RE = re.compile(
+    r'(?:'
+    r'^etc\.?\)?$'
+    r'|^field\b|^symbol$|^lang=|^properties\b|^w\d+$'
+    r'|^this$|^for the\b|^of the\b|^interest in'
+    r'|^fields? from|usually$'
+    r'|^=\s|^\(\*\)|^\)'
+    # Bare single common-word fragments (not person/org names)
+    r'|^(?:holder|schema|property|value|risk|All|reserved)$'
+    r'|^(?:are aliased|for more|in several|related fields)'
+    r'|^(?:to dc:|to the x-default|value to the)'
+    r'|^(?:the combination|sufficient)'
+    r'|^(?:is made available|no copyright)'
+    r'|^property of\b'
+    # Trailing word "Created" after an otherwise valid holder
+    r'|\bCreated$'
+    # Domain-only fragments from broken email splitting (e.g. "potsdam.de>")
+    r'|^[\w.-]+\.\w{2,}>$'
+    # Obfuscation-token orphans: "dot ca>", "do de>", "umu se>"
+    r'|^(?:dot|do|umu)\s+\w+>$'
+    # Translated UI / IPTC metadata strings
+    r'|^(?:informatie|för bilden|na de\b|marks to|sobre a|ut de\b)'
+    r'|^(?:date of|identity in|Exif and|where the|used when|to top of)'
+    r'|^(?:digiKam$|digikam package$|kdegraphics package$|kipi-plugins package$)'
+    # Short all-caps tokens (<=4 chars) or dotted acronyms (M.I.T.)
+    r'|^[A-Z]{1,4}$'
+    r'|^(?:[A-Z]\.){2,}$'
+    # Strings with embedded > (orphan angle bracket from split emails)
+    r'|^[^<]*\w>$'
+    # ── Placeholder / template text from .po translations ──
+    # Example names used in copyright documentation
+    r'|\bJohn Doe\b|\bJane Doe\b|\bJose Fulano\b|\bJose Pires\b|\bJanez Novak\b'
+    # Template variables and boilerplate
+    r'|\bYear\b.*\b(?:Copyright|holder)\b'
+    r'|\bCopyright\s+owner\b'
+    r'|\bYEAR\b'
+    r'|\bThis_file_is_part_of'
+    # Fully parenthesized text: "(XMP is is always preferred)" etc.
+    r'|^\(.*\)$'
+    r')',
+    re.IGNORECASE)
+
+# Holder strings that look like a whole copyright notice was
+# accidentally included (e.g. "Creative Commons Attribution-ShareAlike 2.5 Generic").
+_LICENSE_NAME_AS_HOLDER_RE = re.compile(
+    r'(?:'
+    r'Attribution[-\s]ShareAlike'
+    r'|CC0'
+    r'|\bGPL\b|\bLGPL\b|\bAGPL\b|\bMIT\b'
+    r'|\bApache\b.*[Ll]icense'
+    r'|\b[Cc]ommons\b'
+    r')',
+    re.IGNORECASE)
 
 def _is_plausible_copyright(s):
     """Return True if *s* looks like a real copyright holder string."""
@@ -992,6 +1191,35 @@ def _is_plausible_copyright(s):
     ratio = ascii_printable / len(s)
     if ratio < 0.70:
         return False
+    # Reject code fragments (C++, Qt, XSLT, format strings, etc.)
+    if _CODE_FRAGMENT_RE.search(s):
+        return False
+    # Strip copyright prefix and years to get the author part, then
+    # reject strings that clearly aren't a person or organisation.
+    author = re.sub(r'^(?:copyright\s*)?(?:\(c\)|©)?\s*(?:copyright\s*)?\s*',
+                    '', s, flags=re.IGNORECASE)
+    author = re.sub(r'\b\d{4}\b', '', author)
+    author = re.sub(r'^[\s,;-]+|[\s,;-]+$', '', author).strip()
+    if not author:
+        return False
+    if len(author) < 2:
+        return False
+    if _NOT_A_HOLDER_RE.search(author):
+        return False
+    # Reject license names mistaken for holders
+    if _LICENSE_NAME_AS_HOLDER_RE.search(author):
+        # Allow if it looks like "Free Software Foundation" (org name
+        # that happens to contain a license-adjacent word) but reject
+        # things like "Creative Commons Attribution-ShareAlike 2.5 Generic"
+        if not re.search(r'\b(?:Foundation|Incorporat|GmbH|Ltd|LLC|Corp)\b',
+                         author, re.IGNORECASE):
+            return False
+    # Reject strings that are entirely non-name: no uppercase letter
+    # and no CJK/Cyrillic — likely a code comment or stray phrase.
+    # Exception: email-only entries like "<user@example.com>" are valid.
+    if not re.search(r'[A-Z\u00C0-\u024F\u0400-\u04FF\u4E00-\u9FFF]', author):
+        if not re.match(r'^<[\w.+-]+@[\w.-]+>$', author):
+            return False
     return True
 
 for _r in scan_results:
@@ -1392,6 +1620,7 @@ _LICENSE_FILE_NAMES = {
     "license", "license.txt", "license.md", "licence", "licence.txt",
     "copying.lgpl", "copying.gpl", "copying.bsd", "copying.mit",
     "copying.lib", "unlicense", "unlicense.txt",
+    "copyright", "copyright.txt",
 }
 
 _dir_lic_counts = defaultdict(lambda: defaultdict(int))
@@ -1495,6 +1724,8 @@ if copyright_file and os.path.isfile(copyright_file):
                 # Continuation line for Copyright (additional holders)
                 cops.append(line.strip())
         if files and lic:
+            # Filter out scanner false-positives (code fragments, etc.)
+            cops = [c for c in cops if _is_plausible_copyright(c)]
             for f in files:
                 stanzas.append((f, lic))
                 stanza_copyrights[f] = cops
@@ -2010,11 +2241,25 @@ def _deobfuscate_email(s):
     '(user@example.com)'             → '<user@example.com>'
     '(user at example dot com)'      → '<user@example.com>'
     '(bob dot smith@example.org)'    → '<bob.smith@example.org>'
+    'fabian at ritter dash vogt dot de' → 'fabian@ritter-vogt.de'
+    'mario dot frank at uni minus potsdam dot de'
+                                       → 'mario.frank@uni-potsdam.de'
+    'dmgerman at uvic doooot ca'     → 'dmgerman@uvic.ca'
     """
+    # First normalize variant obfuscation tokens:
+    #   'dash' / 'minus' → '-', 'doooot'/'dooot' etc. → 'dot',
+    #   'underscore' / 'uderscore' → '_'
+    s = re.sub(r'\s+(dash|minus)\s+', '-', s)
+    s = re.sub(r'\bdo{3,}t\b', 'dot', s)  # doooot, dooot, etc.
+    s = re.sub(r'\s+u?n?derscore\s+', '_', s)  # underscore, uderscore
+    # Fix "name_<user@domain>" → "<name_user@domain>" (underscore token
+    # was between the name part and a partially-deobfuscated email).
+    # Also handles "<name_<user@domain>" (leading < from scanner).
+    s = re.sub(r'<?(\w+)_<(\w+@[\w.-]+>)', r'<\1_\2', s)
     # Deobfuscate "word at word dot word" patterns
     def _deob(m):
         return m.group(0).replace(' at ', '@').replace(' dot ', '.')
-    s = re.sub(r'\b\w[\w.+-]* at \w[\w.-]* dot \w+', _deob, s)
+    s = re.sub(r'\b\w[\w.+-]* at \w[\w. -]* dot \w+', _deob, s)
     # Deobfuscate partial: "word dot word@domain" (has @ but still has ' dot ')
     def _deob_partial(m):
         return m.group(0).replace(' dot ', '.')
@@ -2213,6 +2458,10 @@ def merge_copyrights(raw_list, prefer_unicode=None, file_paths=None):
 
     for raw in raw_list:
         if not raw or not raw.strip():
+            continue
+        # Filter out scanner false-positives (code fragments, non-person
+        # text, template variables, etc.) before deobfuscation.
+        if not _is_plausible_copyright(raw):
             continue
         raw = _deobfuscate_email(raw)
         years, author = _parse_copyright(raw)
@@ -4855,9 +5104,237 @@ else:
             print(f"  Removed FSF boilerplate copyright from "
                   f"{_0c_count} GPL-family stanza(s).\n")
 
+        # ── Fix 0c3: Remove implausible copyright holders ────────────
+        # Decopy (and sometimes scanners) attribute code fragments,
+        # IPTC metadata descriptions, or other non-person strings as
+        # copyright holders.  Strip anything that fails the plausibility
+        # check from every Files stanza's Copyright field.
+        _0c3_paras = working_text.split("\n\n")
+        _0c3_count = 0
+        for _pi, _para in enumerate(_0c3_paras):
+            if not re.match(r'^\s*Files:', _para):
+                continue
+            lines = _para.split("\n")
+            cop_values = []
+            cop_start = None
+            cop_end = None
+            in_copyright = False
+            for li, line in enumerate(lines):
+                if line.startswith("Copyright:"):
+                    in_copyright = True
+                    if cop_start is None:
+                        cop_start = li
+                    val = line[10:].strip()
+                    if val:
+                        cop_values.append(val)
+                    cop_end = li + 1
+                elif in_copyright and line.startswith(" ") and line.strip():
+                    cop_values.append(line.strip())
+                    cop_end = li + 1
+                else:
+                    in_copyright = False
+            if cop_start is None or not cop_values:
+                continue
+            filtered = [v for v in cop_values if _is_plausible_copyright(v)]
+            if len(filtered) == len(cop_values):
+                continue  # nothing to remove
+            if not filtered:
+                filtered = ["FIXME"]
+            cop_lines = [f"Copyright: {filtered[0]}"]
+            for fv in filtered[1:]:
+                cop_lines.append(f"           {fv}")
+            new_lines = lines[:cop_start] + cop_lines + lines[cop_end:]
+            _0c3_paras[_pi] = "\n".join(new_lines)
+            _0c3_count += 1
+        if _0c3_count:
+            working_text = "\n\n".join(_0c3_paras)
+            changes_made += 1
+            print(f"  Removed {_0c3_count} implausible copyright holder(s)"
+                  f" (code fragments, metadata text, etc.).\n")
+
+        # ── Fix 0c4: Remove packager-as-copyright from upstream stanzas
+        # Previous runs may have incorrectly used the packager/maintainer
+        # identity as a copyright fallback for upstream file stanzas.
+        # Only Files: * (catch-all) and Files: debian/* should carry the
+        # packager copyright.
+        if packager_name:
+            _packager_re = re.compile(
+                re.escape(packager_name), re.IGNORECASE)
+            _0c4_paras = working_text.split("\n\n")
+            _0c4_count = 0
+            for _pi, _para in enumerate(_0c4_paras):
+                if not re.match(r'^\s*Files:', _para):
+                    continue
+                # Parse file patterns
+                _s_files = []
+                for _line in _para.split("\n"):
+                    if _line.startswith("Files:"):
+                        _s_files.extend(_line[6:].strip().split())
+                    elif _s_files and _line.startswith("       "):
+                        _s_files.extend(_line.strip().split())
+                    elif _s_files:
+                        break
+                # Skip catch-all and debian/* stanzas
+                if _s_files == ["*"]:
+                    continue
+                if any(p.startswith("debian/") for p in _s_files):
+                    continue
+                # Check if Copyright field mentions the packager
+                lines = _para.split("\n")
+                cop_start = cop_end = None
+                for _li, _line in enumerate(lines):
+                    if _line.startswith("Copyright:"):
+                        cop_start = _li
+                    elif cop_start is not None and re.match(
+                            r'^\s{2,}', _line):
+                        pass  # continuation
+                    elif cop_start is not None and cop_end is None:
+                        cop_end = _li
+                if cop_start is not None and cop_end is None:
+                    cop_end = len(lines)
+                if cop_start is None:
+                    continue
+                cop_lines = lines[cop_start:cop_end]
+                # Filter out lines containing the packager name
+                new_cop = []
+                for cl in cop_lines:
+                    if _packager_re.search(cl):
+                        continue
+                    new_cop.append(cl)
+                if len(new_cop) == len(cop_lines):
+                    continue  # packager not found
+                if not new_cop:
+                    new_cop = ["Copyright: FIXME"]
+                new_lines = lines[:cop_start] + new_cop + lines[cop_end:]
+                _0c4_paras[_pi] = "\n".join(new_lines)
+                _0c4_count += 1
+            if _0c4_count:
+                working_text = "\n\n".join(_0c4_paras)
+                changes_made += 1
+                print(f"  Removed packager copyright from "
+                      f"{_0c4_count} upstream stanza(s).\n")
+
+        # ── Fix 0c5: Trim catch-all Copyright to AUTHORS entries ─────
+        # The Files: * stanza should list only project-level copyright
+        # holders (those in AUTHORS / CONTRIBUTORS), not every author
+        # detected in every file.  Specific stanzas handle per-file
+        # attribution.  This fix reads the AUTHORS file, builds a set
+        # of known project authors, and removes non-matching holders
+        # from the catch-all.
+        _authors_path = None
+        for _af in ("AUTHORS", "AUTHORS.md", "CONTRIBUTORS",
+                     "CONTRIBUTORS.md"):
+            if os.path.isfile(_af):
+                _authors_path = _af
+                break
+        if _authors_path:
+            _0c5_known_emails = set()
+            _0c5_known_names = set()
+            with open(_authors_path, encoding="utf-8",
+                      errors="replace") as _af:
+                for _aline in _af:
+                    _aline = _aline.strip()
+                    if not _aline or _aline.startswith(("-", "=", "#")):
+                        continue
+                    # Strip trailing role (": Developer, ...")
+                    _aline = re.sub(r'\s*:.*$', '', _aline)
+                    # Strip leading version tags ("8.2.0 :")
+                    _aline = re.sub(r'^[\d.]+\s*:\s*', '', _aline)
+                    _aline = _deobfuscate_email(_aline)
+                    _ae = _extract_email(_aline)
+                    if _ae:
+                        _0c5_known_emails.add(_ae)
+                    _an = _strip_email(_aline).strip()
+                    if _an and len(_an) > 2:
+                        # Normalise to lowercase for matching
+                        _0c5_known_names.add(_an.lower())
+            if _0c5_known_emails or _0c5_known_names:
+                _0c5_paras = working_text.split("\n\n")
+                _0c5_count = 0
+                for _pi, _para in enumerate(_0c5_paras):
+                    if not re.match(r'^\s*Files:', _para):
+                        continue
+                    # Only touch the catch-all stanza
+                    _s_files = []
+                    for _line in _para.split("\n"):
+                        if _line.startswith("Files:"):
+                            _s_files.extend(_line[6:].strip().split())
+                        elif _s_files and _line.startswith("       "):
+                            _s_files.extend(_line.strip().split())
+                        elif _s_files:
+                            break
+                    if _s_files != ["*"]:
+                        continue
+                    # Parse copyright lines
+                    lines = _para.split("\n")
+                    cop_start = cop_end = None
+                    cop_values = []
+                    in_copyright = False
+                    for _li, _line in enumerate(lines):
+                        if _line.startswith("Copyright:"):
+                            in_copyright = True
+                            if cop_start is None:
+                                cop_start = _li
+                            val = _line[10:].strip()
+                            if val:
+                                cop_values.append(val)
+                            cop_end = _li + 1
+                        elif in_copyright and re.match(
+                                r'^\s{2,}', _line):
+                            val = _line.strip()
+                            if val:
+                                cop_values.append(val)
+                            cop_end = _li + 1
+                        else:
+                            in_copyright = False
+                    if cop_start is None or not cop_values:
+                        continue
+                    # Filter: keep holders whose email or name
+                    # matches an AUTHORS entry
+                    kept = []
+                    for _cv in cop_values:
+                        _ce = _extract_email(_cv)
+                        if _ce and _ce in _0c5_known_emails:
+                            kept.append(_cv)
+                            continue
+                        _cn = _strip_email(_cv).strip()
+                        # Strip leading year(s)
+                        _cn = re.sub(
+                            r'^[\d, -]+', '', _cn).strip()
+                        if _cn and _cn.lower() in _0c5_known_names:
+                            kept.append(_cv)
+                            continue
+                        # Fuzzy: check if any known name is a
+                        # substring or vice versa (handles
+                        # "digiKam developers team" etc.)
+                        _cn_low = _cn.lower()
+                        if any(kn in _cn_low or _cn_low in kn
+                               for kn in _0c5_known_names
+                               if len(kn) > 4):
+                            kept.append(_cv)
+                            continue
+                    dropped = len(cop_values) - len(kept)
+                    if dropped == 0 or not kept:
+                        continue  # nothing to drop, or would empty
+                    # Rebuild copyright block
+                    cop_lines = [f"Copyright: {kept[0]}"]
+                    for _kv in kept[1:]:
+                        cop_lines.append(f"           {_kv}")
+                    new_lines = (lines[:cop_start] + cop_lines
+                                 + lines[cop_end:])
+                    _0c5_paras[_pi] = "\n".join(new_lines)
+                    _0c5_count = dropped
+                if _0c5_count:
+                    working_text = "\n\n".join(_0c5_paras)
+                    changes_made += 1
+                    print(f"  Trimmed {_0c5_count} non-project "
+                          f"copyright holder(s) from Files: * "
+                          f"(kept {len(kept)} from {_authors_path}).\n")
+
         # ── Fix 0c2: Add missing Copyright to Files stanzas ──────────
         # Decopy sometimes emits Files stanzas without a Copyright:
-        # field.  For Files: *, infer holders from scanner data for
+        # field, or with a placeholder "Copyright: FIXME".
+        # For Files: *, infer holders from scanner data for
         # root-level files; for others, use the scanner data for the
         # stanza's file paths.  Falls back to packager identity.
         _0c2_paras = working_text.split("\n\n")
@@ -4865,8 +5342,12 @@ else:
         for _pi, _para in enumerate(_0c2_paras):
             if not re.match(r'^\s*Files:', _para):
                 continue
-            if re.search(r'^Copyright:', _para, re.MULTILINE):
-                continue  # already has Copyright
+            _has_cop = re.search(r'^Copyright:', _para, re.MULTILINE)
+            _is_fixme_cop = bool(
+                _has_cop and re.search(
+                    r'^Copyright:\s*FIXME\s*$', _para, re.MULTILINE))
+            if _has_cop and not _is_fixme_cop:
+                continue  # already has real Copyright
             # Extract file patterns from this stanza
             _stanza_lines = _para.split("\n")
             _stanza_files = []
@@ -4934,24 +5415,39 @@ else:
                     print(f"  Inferred Files: * copyright from "
                           f"upstream metadata: {merged[0]}")
             if not merged:
-                # Fallback: packager identity
-                _fb_parts = []
-                if packager_year:
-                    _fb_parts.append(packager_year)
-                if packager_name:
-                    _fb_parts.append(packager_name)
-                if packager_email:
-                    _fb_parts.append(f"<{packager_email}>")
-                if _fb_parts:
-                    merged = [" ".join(_fb_parts)]
+                # Fallback: packager identity — only for debian/*
+                # or catch-all stanzas; upstream files get FIXME.
+                _is_debian_stanza = any(
+                    p.startswith("debian/") for p in _stanza_files)
+                if is_catchall or _is_debian_stanza:
+                    _fb_parts = []
+                    if packager_year:
+                        _fb_parts.append(packager_year)
+                    if packager_name:
+                        _fb_parts.append(packager_name)
+                    if packager_email:
+                        _fb_parts.append(f"<{packager_email}>")
+                    if _fb_parts:
+                        merged = [" ".join(_fb_parts)]
+                else:
+                    merged = ["FIXME"]
             if not merged:
                 continue
 
             cop_field = format_copyright_field(merged)
-            # Insert Copyright: after the Files: block
-            new_lines = (_stanza_lines[:_files_end]
-                         + [f"Copyright: {cop_field}"]
-                         + _stanza_lines[_files_end:])
+            if _is_fixme_cop:
+                # Replace existing Copyright: FIXME line
+                new_lines = []
+                for _line in _stanza_lines:
+                    if re.match(r'^Copyright:\s*FIXME\s*$', _line):
+                        new_lines.append(f"Copyright: {cop_field}")
+                    else:
+                        new_lines.append(_line)
+            else:
+                # Insert Copyright: after the Files: block
+                new_lines = (_stanza_lines[:_files_end]
+                             + [f"Copyright: {cop_field}"]
+                             + _stanza_lines[_files_end:])
             _0c2_paras[_pi] = "\n".join(new_lines)
             _0c2_count += 1
 
@@ -5519,6 +6015,75 @@ else:
             else:
                 print("  ✗ Skipped.\n")
 
+        # ── Fix 2b: Drop zero-evidence files from specific stanzas ──
+        # Files with no scanner-detected license or copyright have no
+        # evidence supporting their placement in a non-catchall stanza.
+        # They should fall through to the Files: * catch-all instead.
+        # (Common with TODO, README, data files that decopy assigned
+        # heuristically.)
+        _2b_no_evidence = set()
+        for _r in scan_results:
+            _fp = _r["path"].lstrip("./")
+            if _fp.startswith("debian/"):
+                continue
+            if not _r.get("licenses") and not _r.get("copyrights"):
+                _2b_no_evidence.add(_fp)
+        if _2b_no_evidence:
+            _2b_para_stanzas = _parse_paragraph_stanzas(working_text)
+            _2b_dropped = 0
+            for _ps in _2b_para_stanzas:
+                if _ps["files"] == ["*"]:
+                    continue
+                removable = [f for f in _ps["files"]
+                             if "*" not in f and f in _2b_no_evidence]
+                if not removable:
+                    continue
+                kept = [f for f in _ps["files"] if f not in removable]
+                if not kept:
+                    # All files are zero-evidence — remove the entire
+                    # stanza so they fall through to Files: * catch-all.
+                    _orig = _ps["para_text"]
+                    pos = working_text.find(_orig)
+                    if pos >= 0:
+                        # Remove the paragraph and surrounding blank line
+                        end = pos + len(_orig)
+                        if working_text[end:end+2] == "\n\n":
+                            end += 2
+                        elif working_text[end:end+1] == "\n":
+                            end += 1
+                        working_text = (working_text[:pos]
+                                        + working_text[end:])
+                        _2b_dropped += len(removable)
+                    continue
+                # Rebuild the Files: field
+                files_str = format_files_field(kept)
+                _orig = _ps["para_text"]
+                _olines = _orig.split("\n")
+                _fs = None
+                _fe = None
+                for _li, _line in enumerate(_olines):
+                    if _line.startswith("Files:"):
+                        _fs = _li
+                    elif (_fs is not None and _fe is None
+                          and not _line.startswith("       ")):
+                        _fe = _li
+                        break
+                if _fs is None:
+                    continue
+                if _fe is None:
+                    _fe = len(_olines)
+                new_para = "\n".join(
+                    _olines[:_fs] + [files_str] + _olines[_fe:])
+                pos = working_text.find(_orig)
+                if pos >= 0:
+                    working_text = (working_text[:pos] + new_para
+                                    + working_text[pos + len(_orig):])
+                    _2b_dropped += len(removable)
+            if _2b_dropped:
+                changes_made += 1
+                print(f"Dropped {_2b_dropped} zero-evidence file(s) "
+                      f"from specific stanzas (covered by Files: *).\n")
+
         # ── Fix 3: Add missing license text blocks ───────────────────
         # Check if any new licenses were introduced that lack a text block
         new_lics_in_text = set()
@@ -5537,6 +6102,9 @@ else:
                 lic_name = first[8:].strip().split()[0] if first[8:].strip() else None
                 if lic_name:
                     existing_blocks.add(lic_name)
+                    norm = to_dep5(lic_name)
+                    if norm != lic_name:
+                        existing_blocks.add(norm)
 
         # Collect licenses used in file stanzas
         stanza_lics = set()
@@ -5698,6 +6266,8 @@ else:
                 elif _cf == "copyright" and line.startswith(" ") and line.strip():
                     _cops.append(line.strip())
             if _files and _lic:
+                # Filter out scanner false-positives from existing text
+                _cops = [c for c in _cops if _is_plausible_copyright(c)]
                 for f in _files:
                     stanzas_now.append((f, _lic))
                     stanza_copyrights_now[f] = _cops
@@ -6233,6 +6803,160 @@ else:
                 else:
                     print(f"  ✗ Skipped.\n")
 
+        # ── Fix 6b: Collapse explicit file lists into dir/* globs ────
+        # When a stanza lists many individual files, replace them with
+        # dir/* globs where safe.  DEP-5 uses last-match-wins, so
+        # dir/* is safe when every file in that directory that does NOT
+        # belong to this stanza is covered by a more-specific stanza.
+        _6b_para_stanzas = _parse_paragraph_stanzas(working_text)
+        if _6b_para_stanzas:
+            # Map every explicit file to its stanza index
+            _6b_file_to_stanza = {}  # path → list of stanza indices
+            for _si, _ps in enumerate(_6b_para_stanzas):
+                for _fp in _ps["files"]:
+                    if "*" not in _fp:
+                        _6b_file_to_stanza.setdefault(_fp, []).append(_si)
+
+            # Count files per directory across ALL stanzas
+            _6b_dir_files = defaultdict(set)  # dir → set of paths
+            for _fp in _6b_file_to_stanza:
+                _d = str(Path(_fp).parent)
+                _6b_dir_files[_d].add(_fp)
+
+            # Also track which dirs have subdirs in the file set
+            _6b_all_dirs = set(_6b_dir_files.keys())
+
+            # For each stanza, find dirs where it can use dir/*
+            _6b_total_collapsed = 0
+            _6b_paras = working_text.split("\n\n")
+            for _si, _ps in enumerate(_6b_para_stanzas):
+                if _ps["files"] == ["*"]:
+                    continue
+                explicit = [f for f in _ps["files"] if "*" not in f]
+                if len(explicit) < 4:
+                    continue  # too few to bother
+
+                # Group this stanza's files by directory
+                _my_dirs = defaultdict(list)
+                for _fp in explicit:
+                    _d = str(Path(_fp).parent)
+                    _my_dirs[_d].append(_fp)
+
+                new_patterns = list(_ps["files"])  # start with originals
+                collapsed_count = 0
+                for _d, _my_files in sorted(_my_dirs.items()):
+                    if len(_my_files) < 2:
+                        continue
+                    if _d == ".":
+                        continue
+                    # If dir has subdirectories, check whether ALL
+                    # subdir files belong to OTHER stanzas (whose
+                    # specific paths will override our dir/* glob).
+                    has_subdirs = any(
+                        od != _d and od.startswith(_d + "/")
+                        for od in _6b_all_dirs)
+                    if has_subdirs:
+                        # Collect all files in subdirectories
+                        # (fnmatch * matches /, so dir/* also matches
+                        # dir/sub/file — we must verify those files
+                        # are still governed by the correct stanza).
+                        _subdir_files = set()
+                        for _od in _6b_all_dirs:
+                            if _od != _d and _od.startswith(_d + "/"):
+                                _subdir_files |= _6b_dir_files.get(
+                                    _od, set())
+                        # Existing globs in our stanza that already
+                        # cover subdir files (meaning our stanza
+                        # already governs them).
+                        _my_globs = [f for f in _ps["files"]
+                                     if "*" in f]
+                        _subdir_safe = True
+                        for _sf in _subdir_files:
+                            _sf_stanzas = _6b_file_to_stanza.get(
+                                _sf, [])
+                            if not _sf_stanzas:
+                                _subdir_safe = False
+                                break
+                            # Already in our stanza explicitly —
+                            # dir/* doesn't change governance.
+                            if _si in _sf_stanzas:
+                                continue
+                            # Already matched by a glob in our
+                            # stanza — dir/* doesn't change
+                            # governance.
+                            if any(fnmatch.fnmatch(_sf, g)
+                                   for g in _my_globs):
+                                continue
+                            # A later stanza covers it and will
+                            # override our glob (last-match-wins).
+                            if max(_sf_stanzas) > _si:
+                                continue
+                            # Only earlier stanzas cover it — our
+                            # new glob would override them.
+                            _subdir_safe = False
+                            break
+                        if not _subdir_safe:
+                            continue
+                    # Check: all OTHER files in this dir must belong to
+                    # other stanzas (they'll override dir/* with their
+                    # more-specific paths).
+                    all_in_dir = _6b_dir_files.get(_d, set())
+                    other_files = all_in_dir - set(_my_files)
+                    others_covered = all(
+                        _fp in _6b_file_to_stanza
+                        for _fp in other_files)
+                    if not others_covered:
+                        continue
+                    # Also skip if dir/* already in patterns
+                    glob_pat = _d + "/*"
+                    if glob_pat in new_patterns:
+                        continue
+                    # Replace individual files with dir/*
+                    for _fp in _my_files:
+                        if _fp in new_patterns:
+                            new_patterns.remove(_fp)
+                    new_patterns.append(glob_pat)
+                    collapsed_count += len(_my_files)
+
+                if collapsed_count >= 2:
+                    new_patterns.sort()
+                    # Rebuild the Files: field in the paragraph
+                    files_str = format_files_field(new_patterns)
+                    # Find and replace the original paragraph
+                    _orig_para = _ps["para_text"]
+                    # Extract the original Files: block
+                    _orig_lines = _orig_para.split("\n")
+                    _files_start = None
+                    _files_end = None
+                    for _li, _line in enumerate(_orig_lines):
+                        if _line.startswith("Files:"):
+                            _files_start = _li
+                        elif (_files_start is not None
+                              and _files_end is None
+                              and not _line.startswith("       ")):
+                            _files_end = _li
+                            break
+                    if _files_start is None:
+                        continue
+                    if _files_end is None:
+                        _files_end = len(_orig_lines)
+                    new_lines = (_orig_lines[:_files_start]
+                                 + [files_str]
+                                 + _orig_lines[_files_end:])
+                    new_para = "\n".join(new_lines)
+                    pos = working_text.find(_orig_para)
+                    if pos >= 0:
+                        working_text = (working_text[:pos]
+                                        + new_para
+                                        + working_text[
+                                            pos + len(_orig_para):])
+                        _6b_total_collapsed += collapsed_count
+
+            if _6b_total_collapsed:
+                changes_made += 1
+                print(f"Collapsed {_6b_total_collapsed} explicit file "
+                      f"paths into directory globs.\n")
+
         # ── Fix 7: Normalize copyright lines ─────────────────────────
         # Re-parse all stanzas and rebuild copyright lines with
         # consistent formatting: year before holder, deobfuscated
@@ -6473,8 +7197,277 @@ else:
             print(f"Replaced inline license text with common-licenses"
                   f" reference in {fix8_count} stanza(s).\n")
 
+        # ── Fix 0c2-final: Resolve remaining Copyright: FIXME ────────
+        # Fix steps after Fix 0c2 (Fix 1, 3, 6 …) may create stanzas
+        # with Copyright: FIXME when scanner data was unavailable at
+        # that point.  Try harder approaches now that we have all data:
+        #   1. fnmatch scanner data lookup (handles path format differences)
+        #   2. Read actual file headers for Copyright:/Author: lines
+        #   3. Check directory-level COPYRIGHT/COPYING/AUTHORS files
+        _0c2f_paras = working_text.split("\n\n")
+        _0c2f_count = 0
+        _src_root = os.environ.get("SRCDIR", ".")
+        _cop_header_re = re.compile(
+            r'(?:copyright|©|\(c\))\s*'
+            r'(?:\d{4}[\s,\-]*)*\s*(.+)',
+            re.IGNORECASE)
+        _author_header_re = re.compile(
+            r'^\s*(?://|#|/\*|\*|;)\s*'
+            r'(?:Author|@author)\s*:\s*(.+)',
+            re.IGNORECASE)
+        for _pi, _para in enumerate(_0c2f_paras):
+            if not re.match(r'^\s*Files:', _para):
+                continue
+            if not re.search(r'^Copyright:\s*FIXME\s*$', _para,
+                             re.MULTILINE):
+                continue
+
+            # Extract file patterns from the stanza
+            _stanza_lines = _para.split("\n")
+            _stanza_files = []
+            _files_end = 0
+            for _li, _line in enumerate(_stanza_lines):
+                if _line.startswith("Files:"):
+                    rest = _line[6:].strip()
+                    if rest:
+                        _stanza_files.extend(rest.split())
+                    _files_end = _li + 1
+                elif _files_end and _line.startswith("       "):
+                    _stanza_files.extend(_line.strip().split())
+                    _files_end = _li + 1
+                else:
+                    break
+
+            _lic_m = re.search(r'^License:\s*(.+)', _para,
+                               re.MULTILINE)
+            _is_gpl = bool(
+                _lic_m and re.search(
+                    r'\b(GPL|LGPL|AGPL|GFDL)\b',
+                    _lic_m.group(1), re.IGNORECASE))
+            _fsf_re = re.compile(
+                r'free\s+software\s+foundation', re.IGNORECASE)
+
+            # Strategy 1: fnmatch scanner data
+            _inferred = []
+            for r in scan_results:
+                fp = r["path"].lstrip("./")
+                for pat in _stanza_files:
+                    if fnmatch.fnmatch(fp, pat):
+                        for c in r.get("copyrights", []):
+                            if c and not (_is_gpl
+                                          and _fsf_re.search(c)):
+                                _inferred.append(c)
+                        break
+
+            # Strategy 2: Read file headers (first 30 lines)
+            if not _inferred:
+                _sample_files = []
+                for pat in _stanza_files:
+                    if "*" in pat or "?" in pat:
+                        matches = sorted(
+                            globmod.glob(
+                                os.path.join(_src_root, pat)))
+                        # Glob may return dirs; descend to find files
+                        for _gm in matches:
+                            if os.path.isfile(_gm):
+                                _sample_files.append(_gm)
+                            elif os.path.isdir(_gm):
+                                for _df in sorted(
+                                        os.listdir(_gm)):
+                                    _dfp = os.path.join(_gm, _df)
+                                    if os.path.isfile(_dfp):
+                                        _sample_files.append(_dfp)
+                    else:
+                        _fp = os.path.join(_src_root, pat)
+                        if os.path.isfile(_fp):
+                            _sample_files.append(_fp)
+                # Prioritize source-like files over binary/images
+                _SRC_EXT = {'.js', '.py', '.c', '.cpp', '.h', '.rb',
+                            '.pl', '.sh', '.java', '.rs', '.go',
+                            '.css', '.xsl', '.xml', '.html'}
+                _sample_files.sort(
+                    key=lambda p: (
+                        0 if os.path.splitext(p)[1].lower()
+                        in _SRC_EXT else 1, p))
+                for _sf in _sample_files[:15]:
+                    try:
+                        with open(_sf, 'r', errors='ignore') as _fh:
+                            _line_count = 0
+                            for _ln in _fh:
+                                _line_count += 1
+                                if _line_count > 30:
+                                    break
+                                # Check for copyright statement
+                                _cm = _cop_header_re.search(_ln)
+                                if _cm:
+                                    _val = _ln.strip()
+                                    _val = re.sub(
+                                        r'^(?://|#|/\*|\*)\s*',
+                                        '', _val)
+                                    _val = re.sub(
+                                        r'\s*\*/\s*$', '', _val)
+                                    if (_val
+                                            and 'FIXME' not in _val
+                                            and 'TODO' not in _val):
+                                        _inferred.append(_val)
+                                # Check for Author: header
+                                _am = _author_header_re.match(_ln)
+                                if _am:
+                                    _auth = _am.group(1).strip()
+                                    if _auth:
+                                        _inferred.append(_auth)
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                    if _inferred:
+                        break
+
+            # Strategy 3: Directory COPYRIGHT/COPYING/AUTHORS files
+            if not _inferred:
+                for pat in _stanza_files:
+                    # Extract directory: for "dir/*" use "dir",
+                    # for specific files use their parent dir
+                    if pat.endswith("/*"):
+                        _dir = pat[:-2]
+                    elif "*" in pat or "?" in pat:
+                        _dir = os.path.dirname(
+                            pat.split("*")[0].split("?")[0])
+                    else:
+                        _dir = os.path.dirname(pat)
+                    if not _dir:
+                        continue
+                    for _cfn in ("COPYRIGHT", "COPYING",
+                                 "LICENSE", "AUTHORS"):
+                        _cfp = os.path.join(
+                            _src_root, _dir, _cfn)
+                        if not os.path.isfile(_cfp):
+                            continue
+                        try:
+                            with open(_cfp, 'r',
+                                      errors='ignore') as _cfh:
+                                _lines = _cfh.readlines()
+                            # Pass 1: standard copyright regex
+                            for _ln in _lines[:50]:
+                                _cm = _cop_header_re.search(_ln)
+                                if _cm:
+                                    _val = _ln.strip()
+                                    if (_val
+                                            and 'FIXME' not in _val):
+                                        _inferred.append(_val)
+                            # Pass 2: broader heuristics for
+                            # COPYRIGHT/AUTHORS files (e.g. "from
+                            # Geonames.org" or "by Jane Doe")
+                            if (not _inferred
+                                    and _cfn in (
+                                        "COPYRIGHT", "AUTHORS")):
+                                for _ln in _lines[:50]:
+                                    _fm = re.search(
+                                        r'\bfrom\s+'
+                                        r'(\S+\.(?:org|com|io|net'
+                                        r'|edu))\b',
+                                        _ln, re.I)
+                                    if _fm:
+                                        _inferred.append(
+                                            _fm.group(1))
+                        except OSError:
+                            pass
+                    if _inferred:
+                        break
+
+            # Strategy 4: XML metadata & path-based attribution
+            if not _inferred:
+                for pat in _stanza_files:
+                    # OpenStreetMap data in path → standard attribution
+                    if 'openstreetmap' in pat.lower():
+                        _inferred.append(
+                            "OpenStreetMap contributors")
+                        break
+                    # XML files: parse for developer_name / author
+                    _xml_paths = []
+                    if pat.endswith('.xml'):
+                        _xp = os.path.join(_src_root, pat)
+                        if os.path.isfile(_xp):
+                            _xml_paths.append(_xp)
+                    elif '*' in pat:
+                        _xml_paths = [
+                            p for p in sorted(
+                                globmod.glob(
+                                    os.path.join(_src_root, pat)))
+                            if p.endswith('.xml')
+                            and os.path.isfile(p)][:3]
+                    for _xp in _xml_paths:
+                        try:
+                            _tree = ET.parse(_xp)
+                            _xroot = _tree.getroot()
+                            for _el in _xroot.iter():
+                                _ltag = re.sub(
+                                    r'\{[^}]*\}', '', _el.tag)
+                                if _ltag == 'developer_name':
+                                    # Use untranslated (no xml:lang)
+                                    _xlang = _el.get(
+                                        '{http://www.w3.org/XML/'
+                                        '1998/namespace}lang')
+                                    if not _xlang:
+                                        _val = (
+                                            _el.text or '').strip()
+                                        if _val:
+                                            _inferred.append(_val)
+                                            break
+                        except (ET.ParseError, OSError):
+                            pass
+                        if _inferred:
+                            break
+                    if _inferred:
+                        break
+
+            merged = merge_copyrights(_inferred)
+            if not merged:
+                continue
+
+            cop_field = format_copyright_field(merged)
+            new_lines = []
+            for _line in _stanza_lines:
+                if re.match(r'^Copyright:\s*FIXME\s*$', _line):
+                    new_lines.append(f"Copyright: {cop_field}")
+                else:
+                    new_lines.append(_line)
+            _0c2f_paras[_pi] = "\n".join(new_lines)
+            _0c2f_count += 1
+
+        if _0c2f_count:
+            working_text = "\n\n".join(_0c2f_paras)
+            changes_made += 1
+            print(f"  Resolved {_0c2f_count} remaining Copyright:"
+                  f" FIXME stanza(s).\n")
+
         # ── Write result ─────────────────────────────────────────────
         if changes_made > 0:
+            # Deduplicate standalone License: blocks (keep first occurrence)
+            _seen_lic_blocks = set()
+            _dedup_paras = []
+            _dedup_count = 0
+            for para in working_text.split("\n\n"):
+                plines = para.strip().split("\n")
+                if plines:
+                    first = plines[0]
+                    has_files = any(
+                        l.strip().startswith("Files:")
+                        for l in plines)
+                    if (first.startswith("License:")
+                            and not has_files):
+                        lic_name = (
+                            first[8:].strip().split()[0]
+                            if first[8:].strip() else None)
+                        if lic_name and lic_name in _seen_lic_blocks:
+                            _dedup_count += 1
+                            continue
+                        if lic_name:
+                            _seen_lic_blocks.add(lic_name)
+                _dedup_paras.append(para)
+            if _dedup_count:
+                working_text = "\n\n".join(_dedup_paras)
+                print(f"Removed {_dedup_count} duplicate standalone "
+                      f"License block(s).")
+
             # Clean up any double-blank-lines introduced
             while "\n\n\n" in working_text:
                 working_text = working_text.replace("\n\n\n", "\n\n")

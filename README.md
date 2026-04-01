@@ -23,7 +23,11 @@ A Debian `debian/copyright` file generator, validator, and reviewer. Scans sourc
 - **Unresolved stub warning**: after writing, any remaining `FIXME`/`TODO`/`PLACEHOLDER` tokens are reported with their line numbers
 - **Email deobfuscation**: converts "alice at example dot com" and similar patterns to proper addresses; normalizes parenthesized emails to angle brackets
 - **Corporate suffix awareness**: names ending in Inc., Ltd., LLC, GmbH, and similar suffixes are never split on commas
-- **130+ SPDX-to-DEP-5 mappings**: GFDL, Creative Commons 1.0–4.0, AGPL, EPL, CDDL, OSL families
+- **Scan caching**: `--cache-dir` reuses scancode, licensecheck, and decopy results across runs, cutting repeated audits from ~25 min to ~42 s on large codebases
+- **Patch-file awareness**: detects false-positive license identifiers inside unified diff context lines and excludes them from scan results
+- **AUTHORS-based catch-all trimming**: filters the `Files: *` copyright list to only holders found in the project's AUTHORS/CONTRIBUTORS file
+- **Implausible holder filtering**: automatically removes code fragments, template variables, and non-person text misidentified as copyright holders
+- **130+ SPDX-to-DEP-5 mappings**: GFDL, Creative Commons 1.0–4.0, CC-GPL, AGPL, EPL, CDDL, OSL families
 
 ## Requirements
 
@@ -77,6 +81,7 @@ copyright-audit --fix --yes [source-dir]
 | `--export FILE` | Export full review findings to file (review mode) |
 | `-v, --verbose` | Include likely false positives |
 | `--no-fetch` | Skip license text downloads |
+| `--cache-dir DIR` | Reuse cached scan results from DIR (skip scanning if present) |
 | `-j, --jobs N` | Parallel ScanCode workers (default: nproc) |
 | `-h, --help` | Show help |
 

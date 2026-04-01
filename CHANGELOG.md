@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-03-31
+
+### Added
+- `--cache-dir DIR` option: reuse scancode/licensecheck/decopy results
+  from a directory, skipping re-scanning when cached output files already
+  exist. Dramatically speeds up iterative runs (e.g. ~42 s vs ~25 min
+  for the digikam 9.0 source tree)
+- Fix 0c3: implausible copyright holder removal — filters out code
+  fragments, boilerplate strings, template variables, and other
+  non-person text that scanners sometimes misidentify as copyright
+  holders (e.g. `nullptr`, `@author`, `${PROJECT_NAME}`)
+- Fix 0c4: packager-as-copyright removal — strips the debian packager's
+  identity from Copyright fields in upstream (non-`debian/*`) stanzas,
+  since the packager is not an upstream copyright holder
+- Fix 0c5: trim catch-all Copyright to AUTHORS entries — for the
+  `Files: *` catch-all stanza, filters copyright holders to only those
+  whose name or email appears in the project's AUTHORS/CONTRIBUTORS
+  file, preventing every per-file author from polluting the project-
+  level attribution
+- Fix 6b: glob consolidation — collapses explicit per-file entries into
+  `dir/*` globs when all files in a directory share the same stanza,
+  with a safety check to avoid overriding different-author stanzas via
+  DEP-5 last-match-wins semantics
+- Fix 0c2-final: late-stage FIXME resolution — runs after all other
+  fix steps to resolve `Copyright: FIXME` stanzas introduced by Fix 1,
+  Fix 3, and other steps. Uses four strategies: (1) fnmatch scanner
+  data lookup, (2) file header reading (Copyright:/Author: patterns,
+  prioritizing source-code extensions), (3) directory COPYRIGHT/AUTHORS
+  files with broad attribution heuristics, (4) XML `<developer_name>`
+  metadata and path-based inference (e.g. OpenStreetMap)
+- Patch-file false-positive filter: detects when a `.patch`/`.diff`
+  file's scanner-detected licenses all originate from unified diff
+  context lines (not the patch's own license header) and clears them
+  from scan results, preventing false LGPL/GPL stanzas from SPDX
+  identifiers in patched source code
+- CC-GPL SPDX-to-DEP-5 mappings: added `cc-gpl-2.0` → `GPL-2`,
+  `cc-gpl-3.0` → `GPL-3`, `cc-lgpl-2.1` → `LGPL-2.1`,
+  `cc-lgpl-3.0` → `LGPL-3` (and short-form variants)
+
+### Fixed
+- Fix 0c2 now also resolves existing `Copyright: FIXME` lines (not
+  just missing Copyright fields): treats FIXME as needing resolution
+  and replaces the line in place rather than inserting a duplicate
+- Fix 2b now removes entire stanzas when all files are zero-evidence
+  (previously skipped them, leaving orphaned stanzas with FIXME
+  copyright that could never be resolved)
+- Fix 0c2-final handles files in subdirectories under glob patterns:
+  e.g. `elegant/resources/*` now correctly descends into `css/`,
+  `images/`, `js/` subdirectories to find source files with copyright
+  headers, and prioritizes source-code extensions (`.js`, `.css`,
+  `.xml`) over binary files
+
 ## 2026-03-30
 
 ### Added
