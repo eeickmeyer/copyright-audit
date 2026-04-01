@@ -144,7 +144,7 @@ avoid splitting names like "Rep Invariant Systems, Inc." on commas.
 | 2798–2851 | `check_consolidation()` | Groups stanzas by (license, holder-set); identifies merge candidates |
 | 2854–2924 | `check_over_broad_attribution()` | Detects glob stanzas where declared holders are only found in a subset of matching files; returns list of dicts with para, holder_raw, holder_norm, detected_files, governed_files, single_holder |
 | 2926–3014 | `check_under_broad_attribution()` | Detects glob stanzas where declared holders are also detected in files NOT covered by the stanza's globs (and no other specific stanza covers those files); returns list of dicts with para, holder_raw, holder_norm, uncovered_files, stanza_files |
-| 3016–3093 | `_simplify_file_list()` | Reduces file lists to dir/* globs; merges sibling globs with common prefixes |
+| 3016–3113 | `_simplify_file_list()` | Reduces file lists to dir/* globs; tries extension-based wildcards (dir/*.ext) when dir/* is unsafe; merges sibling globs with common prefixes. Accepts optional `all_files` set for collateral-checking extension globs |
 
 ### Superfluous Detection (lines 2932–3012)
 

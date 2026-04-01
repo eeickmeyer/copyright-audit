@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 ## 2026-04-01
 
 ### Added
+- Extension-based wildcard globbing (`dir/*.png`, `dir/*.svg`, etc.)
+  across all glob-building logic: `_simplify_file_list()`,
+  `_f9_build_globs()`, `_f9b_build_globs()`, and Fix 6b callers.
+  When a directory can't be collapsed to `dir/*` (mixed holders),
+  files sharing an extension are grouped into `dir/*.ext` wildcards
+  as long as no collateral files of that extension exist outside the
+  intended set. Requires 2+ files of the same extension to trigger.
 - Fix 9: split/narrow over-broad glob attribution — when a `dir/*`
   stanza declares a copyright holder that was only detected in a
   subset of the matching files:

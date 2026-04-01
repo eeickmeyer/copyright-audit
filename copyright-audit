@@ -3013,7 +3013,7 @@ def check_under_broad_attribution(text=None):
     return issues
 
 
-def _simplify_file_list(paths, all_dir_counts=None):
+def _simplify_file_list(paths, all_dir_counts=None, all_files=None):
     """Reduce a list of file paths using glob patterns where possible.
 
     For each directory, if the stanza owns ALL files in that directory,
@@ -3022,6 +3022,12 @@ def _simplify_file_list(paths, all_dir_counts=None):
     only used when the stanza's files in that directory equal the total.
     This prevents a stanza for one author from claiming dir/* when other
     authors also have files in the same directory.
+
+    When dir/* is not safe, extension-based wildcards (dir/*.png) are
+    tried when 2+ files share an extension and no collateral files of
+    that extension exist outside *paths*.  *all_files* (set of all known
+    file paths) is used for the collateral check; if not provided,
+    extension globbing is skipped.
     """
     dirs = defaultdict(list)
     for p in paths:
@@ -3042,7 +3048,33 @@ def _simplify_file_list(paths, all_dir_counts=None):
         if all_dir_counts and d in all_dir_counts:
             owns_all = len(files) >= all_dir_counts[d]
         if d == "." or len(files) < 2 or has_subdirs or not owns_all:
-            phase1.extend(sorted(files))
+            # Try extension-based wildcards (dir/*.ext) when we can't
+            # collapse the whole directory
+            if all_files and d != "." and len(files) >= 2:
+                ext_groups = defaultdict(list)
+                for fp in files:
+                    ext = Path(fp).suffix.lower()
+                    if ext:
+                        ext_groups[ext].append(fp)
+                    # No extension → stays individual
+                remaining = [fp for fp in files
+                             if not Path(fp).suffix.lower()]
+                for ext, ext_files in sorted(ext_groups.items()):
+                    if len(ext_files) < 2:
+                        remaining.extend(ext_files)
+                        continue
+                    proposed = d + "/*" + ext
+                    collateral = [
+                        f for f in all_files
+                        if fnmatch.fnmatch(f, proposed)
+                        and f not in set(paths)]
+                    if not collateral:
+                        phase1.append(proposed)
+                    else:
+                        remaining.extend(ext_files)
+                phase1.extend(sorted(remaining))
+            else:
+                phase1.extend(sorted(files))
         else:
             phase1.append(d + "/*")
 
@@ -5877,9 +5909,12 @@ else:
                         continue
                     _sd = str(Path(_sg).parent)
                     _fix1_dir_counts[_sd] += 1
+                _fix1_all_files = {r["path"].lstrip("./")
+                                   for r in scan_results}
                 globs = _simplify_file_list(
                     sorted(f.lstrip("./") for f in files),
-                    all_dir_counts=_fix1_dir_counts)
+                    all_dir_counts=_fix1_dir_counts,
+                    all_files=_fix1_all_files)
 
                 print(f"  Proposed stanza ({len(files)} file(s)):")
                 print(f"  ┌──────────────────────────────────────")
@@ -7049,9 +7084,12 @@ else:
                                 continue
                             _d6 = str(Path(_f6).parent)
                             _fix6_dir_counts[_d6] += 1
+                    _fix6_all_files = {r["path"].lstrip("./")
+                                       for r in scan_results}
                     simplified = _simplify_file_list(
                         merged_files,
-                        all_dir_counts=_fix6_dir_counts)
+                        all_dir_counts=_fix6_dir_counts,
+                        all_files=_fix6_all_files)
                     files_str = format_files_field(simplified)
                     cop_field = format_copyright_field(merged_cops)
                     merged_stanza = (f"{files_str}\n"
@@ -7739,28 +7777,55 @@ else:
         # broad one so it overrides for the relevant files.
 
         def _f9_build_globs(subset_files, governed_set):
-            """Build prefix-based globs for a file subset within a
-            governed set, falling back to individual paths."""
+            """Build prefix-based or extension-based globs for a file
+            subset within a governed set, falling back to individual
+            paths."""
             _dirs = defaultdict(list)
             for _fp in subset_files:
                 _dirs[str(Path(_fp).parent)].append(_fp)
             _globs = []
+            _subset_set = set(subset_files)
             for _d, _dfiles in sorted(_dirs.items()):
                 if _d == "." or len(_dfiles) < 2:
                     _globs.extend(sorted(_dfiles))
                     continue
+                # Try prefix-based glob first
                 basenames = [os.path.basename(f) for f in _dfiles]
                 cpfx = os.path.commonprefix(basenames)
                 if len(cpfx) > 3:
                     _proposed = (_d + "/" + cpfx + "*"
                                  if _d != "." else cpfx + "*")
                     _collateral = [
-                        f for f in governed_set - set(subset_files)
+                        f for f in governed_set - _subset_set
                         if fnmatch.fnmatch(f, _proposed)]
                     if not _collateral:
                         _globs.append(_proposed)
+                        continue
+                # Prefix failed or too short — try extension-based
+                _ext_groups = defaultdict(list)
+                _remaining = []
+                for fp in _dfiles:
+                    ext = Path(fp).suffix.lower()
+                    if ext:
+                        _ext_groups[ext].append(fp)
                     else:
-                        _globs.extend(sorted(_dfiles))
+                        _remaining.append(fp)
+                _ext_used = False
+                for ext, ext_files in sorted(_ext_groups.items()):
+                    if len(ext_files) < 2:
+                        _remaining.extend(ext_files)
+                        continue
+                    _proposed = _d + "/*" + ext
+                    _collateral = [
+                        f for f in governed_set - _subset_set
+                        if fnmatch.fnmatch(f, _proposed)]
+                    if not _collateral:
+                        _globs.append(_proposed)
+                        _ext_used = True
+                    else:
+                        _remaining.extend(ext_files)
+                if _ext_used or _remaining:
+                    _globs.extend(sorted(_remaining))
                 else:
                     _globs.extend(sorted(_dfiles))
             return sorted(_globs)
@@ -8001,7 +8066,8 @@ else:
         # the uncovered files with just the under-broad holder.
 
         def _f9b_build_globs(subset_files, existing_files=None):
-            """Build prefix-based globs for uncovered files."""
+            """Build prefix-based or extension-based globs for
+            uncovered files."""
             _dirs = defaultdict(list)
             for _fp in subset_files:
                 _dirs[str(Path(_fp).parent)].append(_fp)
@@ -8014,13 +8080,12 @@ else:
                 if _d == "." or len(_dfiles) < 2:
                     _globs.extend(sorted(_dfiles))
                     continue
+                # Try prefix-based glob first
                 basenames = [os.path.basename(f) for f in _dfiles]
                 cpfx = os.path.commonprefix(basenames)
                 if len(cpfx) > 3:
                     _proposed = (_d + "/" + cpfx + "*"
                                  if _d != "." else cpfx + "*")
-                    # Avoid collateral: check if glob matches files
-                    # beyond the intended set
                     _collateral = [
                         r["path"].lstrip("./") for r in scan_results
                         if fnmatch.fnmatch(r["path"].lstrip("./"),
@@ -8028,8 +8093,34 @@ else:
                         and r["path"].lstrip("./") not in _all_known]
                     if not _collateral:
                         _globs.append(_proposed)
+                        continue
+                # Prefix failed or too short — try extension-based
+                _ext_groups = defaultdict(list)
+                _remaining = []
+                for fp in _dfiles:
+                    ext = Path(fp).suffix.lower()
+                    if ext:
+                        _ext_groups[ext].append(fp)
                     else:
-                        _globs.extend(sorted(_dfiles))
+                        _remaining.append(fp)
+                _ext_used = False
+                for ext, ext_files in sorted(_ext_groups.items()):
+                    if len(ext_files) < 2:
+                        _remaining.extend(ext_files)
+                        continue
+                    _proposed = _d + "/*" + ext
+                    _collateral = [
+                        r["path"].lstrip("./") for r in scan_results
+                        if fnmatch.fnmatch(r["path"].lstrip("./"),
+                                           _proposed)
+                        and r["path"].lstrip("./") not in _all_known]
+                    if not _collateral:
+                        _globs.append(_proposed)
+                        _ext_used = True
+                    else:
+                        _remaining.extend(ext_files)
+                if _ext_used or _remaining:
+                    _globs.extend(sorted(_remaining))
                 else:
                     _globs.extend(sorted(_dfiles))
             return sorted(_globs)
