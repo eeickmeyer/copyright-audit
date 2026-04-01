@@ -751,7 +751,7 @@ def is_metadata_file(filepath):
 SPDX_TO_DEP5 = {
     # MIT / Expat variants
     "mit": "Expat", "expat": "Expat", "x11": "Expat",
-    "mit~old": "Expat", "mit-cmu": "Expat",
+    "mit/x11": "Expat", "mit~old": "Expat", "mit-cmu": "Expat",
     "mit-0": "MIT-0",
     # BSD variants
     "bsd-3-clause": "BSD-3-Clause", "bsd-3-clause-no-nuclear-license": "BSD-3-Clause",
@@ -905,6 +905,7 @@ def norm_cmp(lic):
     s = s.replace("-or-later", "+").replace("-only", "")
     ALIASES = {
         "expat": "expat", "mit": "expat", "x11": "expat",
+        "mit/x11": "expat",
         "mit~old": "expat", "mit-cmu": "expat",
         "artistic": "artistic", "artistic-1": "artistic",
         "bsd": "bsd", "bsd-3-clause": "bsd-3-clause",

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-04-01
+
+### Fixed
+- SPDX-to-DEP-5 normalization: added `mit/x11` → `Expat` mapping so
+  license names like `MIT/X11` (as emitted by decopy/licensecheck) are
+  correctly normalized; previously they passed through unchanged,
+  causing Fix 3b to fail to resolve the stub license text
+
 ## 2026-03-31
 
 ### Added

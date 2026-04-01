@@ -40,7 +40,7 @@ interactive fixing.
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 751–879 | `SPDX_TO_DEP5` | 130+ entry mapping dict from scanner output to DEP-5 names (includes CC-GPL variants) |
+| 751–879 | `SPDX_TO_DEP5` | 130+ entry mapping dict from scanner output to DEP-5 names (includes CC-GPL variants, MIT/X11) |
 | 881–891 | `to_dep5()` | Normalize any license ID to DEP-5 convention |
 | 893–899 | `SOURCE_EXTS` | Set of recognized source-code file extensions |
 | 901–915 | `norm_cmp()` | Normalize for comparison only (collapses aliases, strips versions) |
