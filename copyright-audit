@@ -2851,6 +2851,168 @@ def check_consolidation(text=None):
             })
     return consolidatable
 
+def check_over_broad_attribution(text=None):
+    """Detect glob stanzas that attribute a holder to more files than detected.
+
+    Returns list of dicts:
+    [{"para": dict from _parse_paragraph_stanzas,
+      "holder_raw": str,       # declared copyright line
+      "holder_norm": str,      # normalized holder key
+      "detected_files": [str], # files where holder was detected
+      "governed_files": [str], # all files matching the stanza's globs
+      "single_holder": bool}]  # True if the stanza has only one holder
+    """
+    src = text if text is not None else copyright_text
+    para_stanzas = _parse_paragraph_stanzas(src)
+    issues = []
+
+    for ps in para_stanzas:
+        if not any("*" in f for f in ps["files"]):
+            continue
+        if ps["files"] == ["*"]:
+            continue
+
+        # Collect all scanned files governed by this stanza's globs
+        governed = set()
+        for r in scan_results:
+            fp = r["path"].lstrip("./")
+            if any(fnmatch.fnmatch(fp, g) for g in ps["files"]):
+                governed.add(fp)
+        if len(governed) < 2:
+            continue
+
+        # For each declared holder, find which governed files have
+        # that holder detected by the scanner
+        holder_files = {}  # norm → set of filepaths
+        holder_raw = {}    # norm → raw declared string
+        for cop in ps["cops"]:
+            nc = norm_copyright(cop)
+            if not nc:
+                continue
+            holder_raw[nc] = cop
+            holder_files[nc] = set()
+
+        for fp in governed:
+            for r in scan_results:
+                rp = r["path"].lstrip("./")
+                if rp != fp:
+                    continue
+                for c in r.get("copyrights", []):
+                    if not c:
+                        continue
+                    nc_det = norm_copyright(c)
+                    if not nc_det:
+                        continue
+                    for nc_decl in holder_files:
+                        if nc_det in nc_decl or nc_decl in nc_det:
+                            holder_files[nc_decl].add(fp)
+                break
+
+        # Find holders detected in some but not all files
+        for nc, files in holder_files.items():
+            if 0 < len(files) < len(governed):
+                issues.append({
+                    "para": ps,
+                    "holder_raw": holder_raw[nc],
+                    "holder_norm": nc,
+                    "detected_files": sorted(files),
+                    "governed_files": sorted(governed),
+                    "single_holder": len(ps["cops"]) == 1,
+                })
+
+    return issues
+
+
+def check_under_broad_attribution(text=None):
+    """Detect stanzas where a declared holder is also detected in files
+    NOT covered by the stanza's globs (attribution too narrow).
+
+    Returns list of dicts:
+    [{"para": dict from _parse_paragraph_stanzas,
+      "holder_raw": str,       # declared copyright line
+      "holder_norm": str,      # normalized holder key
+      "uncovered_files": [str],# files where holder detected but not covered
+      "stanza_files": [str]}]  # files currently governed by the stanza
+    """
+    src = text if text is not None else copyright_text
+    para_stanzas = _parse_paragraph_stanzas(src)
+
+    # Build map: norm_holder → all files where the scanner detected them
+    holder_all_files = defaultdict(set)
+    for r in scan_results:
+        fp = r["path"].lstrip("./")
+        if Path(fp).name.lower() in _LICENSE_FILE_NAMES:
+            continue
+        for c in r.get("copyrights", []):
+            if not c:
+                continue
+            nc = norm_copyright(c)
+            if nc:
+                holder_all_files[nc].add(fp)
+
+    issues = []
+
+    for ps in para_stanzas:
+        if ps["files"] == ["*"]:
+            continue
+        # Require at least one glob pattern — explicit file lists
+        # are already precise and should not be widened.
+        if not any("*" in f for f in ps["files"]):
+            continue
+
+        # Collect files governed by this stanza's globs
+        governed = set()
+        for r in scan_results:
+            fp = r["path"].lstrip("./")
+            if any(fnmatch.fnmatch(fp, g) for g in ps["files"]):
+                governed.add(fp)
+
+        for cop in ps["cops"]:
+            nc = norm_copyright(cop)
+            if not nc:
+                continue
+
+            # Find all files where this holder was detected
+            detected_all = set()
+            for nc_det, files in holder_all_files.items():
+                if nc_det in nc or nc in nc_det:
+                    detected_all |= files
+
+            if not detected_all:
+                continue
+
+            # Files detected but NOT covered by this stanza
+            uncovered = detected_all - governed
+            if not uncovered:
+                continue
+
+            # Exclude files covered by OTHER non-catch-all stanzas
+            # that also declare this holder
+            for other_ps in para_stanzas:
+                if other_ps is ps:
+                    continue
+                if other_ps["files"] == ["*"]:
+                    continue
+                other_norms = [norm_copyright(c) for c in other_ps["cops"]]
+                if any(on and (on in nc or nc in on) for on in other_norms):
+                    uncovered = {
+                        fp for fp in uncovered
+                        if not any(fnmatch.fnmatch(fp, g)
+                                   for g in other_ps["files"])}
+            if not uncovered:
+                continue
+
+            issues.append({
+                "para": ps,
+                "holder_raw": cop,
+                "holder_norm": nc,
+                "uncovered_files": sorted(uncovered),
+                "stanza_files": sorted(governed),
+            })
+
+    return issues
+
+
 def _simplify_file_list(paths, all_dir_counts=None):
     """Reduce a list of file paths using glob patterns where possible.
 
@@ -4078,12 +4240,47 @@ if mode == "review":
     else:
         print("[INFO] Scanner cross-validation skipped (no secondary scanner available)")
 
+    # Test 20: Over-broad glob attribution
+    over_broad = check_over_broad_attribution()
+    if over_broad:
+        print(f"[WARN] Over-broad glob attribution: "
+              f"{len(over_broad)} holder(s) attributed to more files than detected")
+        _lim = len(over_broad) if verbose else 5
+        for ob in over_broad[:_lim]:
+            globs = " ".join(ob["para"]["files"])
+            n_det = len(ob["detected_files"])
+            n_gov = len(ob["governed_files"])
+            print(f"        {globs}: {ob['holder_raw']}")
+            print(f"          detected in {n_det}/{n_gov} files")
+        if len(over_broad) > _lim:
+            print(f"        ... and {len(over_broad) - _lim} more")
+    else:
+        print("[PASS] No over-broad glob attribution detected")
+
+    # Test 21: Under-broad glob attribution
+    under_broad = check_under_broad_attribution()
+    if under_broad:
+        print(f"[WARN] Under-broad glob attribution: "
+              f"{len(under_broad)} holder(s) detected in files outside their stanza")
+        _lim = len(under_broad) if verbose else 5
+        for ub in under_broad[:_lim]:
+            globs = " ".join(ub["para"]["files"])
+            n_unc = len(ub["uncovered_files"])
+            print(f"        {globs}: {ub['holder_raw']}")
+            print(f"          also detected in {n_unc} uncovered file(s)")
+        if len(under_broad) > _lim:
+            print(f"        ... and {len(under_broad) - _lim} more")
+    else:
+        print("[PASS] No under-broad glob attribution detected")
+
     fixme_ok = not fixme_stanzas
     versionless_ok = not versionless
     override_ok = not override_issues
     dup_ok = not dup_files
     compat_ok = not all_compat
     superfluous_ok = not _superfluous
+    over_broad_ok = not over_broad
+    under_broad_ok = not under_broad
 
     if not compat_ok:
         print("VERDICT: BLOCKED — license incompatibility detected. "
@@ -4091,7 +4288,8 @@ if mode == "review":
     elif (real_count == 0 and not missing_in_copyright and not nonfree_found
             and lic_ok and cov_ok and not stale and dep5_ok
             and not missing_holders and fixme_ok and versionless_ok
-            and override_ok and dup_ok and superfluous_ok):
+            and override_ok and dup_ok and superfluous_ok
+            and over_broad_ok and under_broad_ok):
         print("VERDICT: debian/copyright appears complete and accurate.")
     elif real_count < 10 and not nonfree_found and dep5_ok:
         print("VERDICT: Minor issues — mostly acceptable, review flagged items.")
@@ -4194,6 +4392,29 @@ if mode == "review":
                     ef.write(f"  + {glob_pat}: {holder}\n")
                 for glob_pat, holder in extra_holders:
                     ef.write(f"  - {glob_pat}: {holder}\n")
+                ef.write("\n")
+
+            if over_broad:
+                ef.write(f"OVER-BROAD GLOB ATTRIBUTION ({len(over_broad)})\n")
+                ef.write("-" * 78 + "\n")
+                for ob in over_broad:
+                    globs = " ".join(ob["para"]["files"])
+                    n_det = len(ob["detected_files"])
+                    n_gov = len(ob["governed_files"])
+                    ef.write(f"  {globs}: {ob['holder_raw']}\n")
+                    ef.write(f"    detected in {n_det}/{n_gov} files\n")
+                ef.write("\n")
+
+            if under_broad:
+                ef.write(f"UNDER-BROAD GLOB ATTRIBUTION ({len(under_broad)})\n")
+                ef.write("-" * 78 + "\n")
+                for ub in under_broad:
+                    globs = " ".join(ub["para"]["files"])
+                    n_unc = len(ub["uncovered_files"])
+                    n_gov = len(ub["stanza_files"])
+                    ef.write(f"  {globs}: {ub['holder_raw']}\n")
+                    ef.write(f"    covers {n_gov} files, "
+                             f"also detected in {n_unc} more\n")
                 ef.write("\n")
 
             if decopy_issues:
@@ -4530,6 +4751,61 @@ else:
         print("\nDeclared copyright holders match detected holders.")
     print()
 
+    # Over-broad glob attribution
+    over_broad = check_over_broad_attribution()
+    print("=" * W)
+    print("SECTION 8b: OVER-BROAD GLOB ATTRIBUTION")
+    print("=" * W)
+
+    if over_broad:
+        print(f"\n{len(over_broad)} holder(s) attributed to more files than detected:\n")
+        for ob in over_broad:
+            globs = " ".join(ob["para"]["files"])
+            n_det = len(ob["detected_files"])
+            n_gov = len(ob["governed_files"])
+            print(f"    {globs}")
+            print(f"      {ob['holder_raw']}  (detected in {n_det}/{n_gov} matched files)")
+            if verbose:
+                det_set = set(ob["detected_files"])
+                extra = sorted(set(ob["governed_files"]) - det_set)
+                for fp in extra[:10]:
+                    print(f"        NOT detected: {fp}")
+                if len(extra) > 10:
+                    print(f"        ... and {len(extra) - 10} more")
+        print()
+        print("  Tip: Use --fix to narrow over-broad globs so each holder")
+        print("  is only attributed to files where they were actually detected.")
+    else:
+        print("\nNo over-broad glob attribution detected.")
+    print()
+
+    # Under-broad glob attribution
+    under_broad = check_under_broad_attribution()
+    print("=" * W)
+    print("SECTION 8c: UNDER-BROAD GLOB ATTRIBUTION")
+    print("=" * W)
+
+    if under_broad:
+        print(f"\n{len(under_broad)} holder(s) detected in files outside their stanza:\n")
+        for ub in under_broad:
+            globs = " ".join(ub["para"]["files"])
+            n_unc = len(ub["uncovered_files"])
+            n_gov = len(ub["stanza_files"])
+            print(f"    {globs}")
+            print(f"      {ub['holder_raw']}  (covers {n_gov} files, "
+                  f"but also detected in {n_unc} more)")
+            if verbose:
+                for fp in ub["uncovered_files"][:10]:
+                    print(f"        NOT covered: {fp}")
+                if len(ub["uncovered_files"]) > 10:
+                    print(f"        ... and {len(ub['uncovered_files']) - 10} more")
+        print()
+        print("  Tip: Use --fix to widen stanza globs so each holder is")
+        print("  attributed to all files where they were actually detected.")
+    else:
+        print("\nNo under-broad glob attribution detected.")
+    print()
+
     # Stanza consolidation opportunities
     consol_groups = check_consolidation()
     print("=" * W)
@@ -4625,6 +4901,10 @@ else:
     consol_saving = sum(len(g['stanzas']) - 1 for g in consol_groups) if consol_groups else 0
     if consol_groups:
         print(f"  Stanzas consolidatable:                {consol_saving} (in {len(consol_groups)} group(s))")
+    if over_broad:
+        print(f"  Over-broad glob attributions:          {len(over_broad)}")
+    if under_broad:
+        print(f"  Under-broad glob attributions:         {len(under_broad)}")
     if has_sanity_check:
         if sanity_real_disc:
             print(f"  Scanner cross-validation (all disagree): {len(sanity_real_disc)}")
@@ -4632,8 +4912,11 @@ else:
             print(f"  Scanner cross-validation (2-of-3 ok):  {len(sanity_consensus)}")
 
     _superfluous_count = len(_superfluous) if '_superfluous' in dir() else 0
+    _over_broad_count = len(over_broad) if 'over_broad' in dir() else 0
+    _under_broad_count = len(under_broad) if 'under_broad' in dir() else 0
     total_issues = (real_count + len(src_uncovered) + len(stale)
-                    + len(dep5_errors) + _superfluous_count)
+                    + len(dep5_errors) + _superfluous_count
+                    + _over_broad_count + _under_broad_count)
     if total_issues == 0:
         print("\n  RESULT: debian/copyright appears complete.")
     else:
@@ -7703,6 +7986,162 @@ else:
 
         if _f9_splits:
             print(f"Split/narrowed {_f9_splits} over-broad "
+                  f"attribution(s).\n")
+
+        # ── Fix 9b: Widen under-broad glob attribution ───────────────
+        # When a stanza declares a copyright holder that was also
+        # detected in files NOT covered by the stanza's globs, widen
+        # the stanza (or insert an additional stanza) so the holder is
+        # attributed to all files where they were actually detected.
+        #
+        # Single-holder stanzas: add uncovered file globs to the
+        # existing Files: field.
+        #
+        # Multi-holder stanzas: insert a new specific stanza covering
+        # the uncovered files with just the under-broad holder.
+
+        def _f9b_build_globs(subset_files, existing_files=None):
+            """Build prefix-based globs for uncovered files."""
+            _dirs = defaultdict(list)
+            for _fp in subset_files:
+                _dirs[str(Path(_fp).parent)].append(_fp)
+            _globs = []
+            # Compute all file set for collateral check
+            _all_known = set(subset_files)
+            if existing_files:
+                _all_known |= set(existing_files)
+            for _d, _dfiles in sorted(_dirs.items()):
+                if _d == "." or len(_dfiles) < 2:
+                    _globs.extend(sorted(_dfiles))
+                    continue
+                basenames = [os.path.basename(f) for f in _dfiles]
+                cpfx = os.path.commonprefix(basenames)
+                if len(cpfx) > 3:
+                    _proposed = (_d + "/" + cpfx + "*"
+                                 if _d != "." else cpfx + "*")
+                    # Avoid collateral: check if glob matches files
+                    # beyond the intended set
+                    _collateral = [
+                        r["path"].lstrip("./") for r in scan_results
+                        if fnmatch.fnmatch(r["path"].lstrip("./"),
+                                           _proposed)
+                        and r["path"].lstrip("./") not in _all_known]
+                    if not _collateral:
+                        _globs.append(_proposed)
+                    else:
+                        _globs.extend(sorted(_dfiles))
+                else:
+                    _globs.extend(sorted(_dfiles))
+            return sorted(_globs)
+
+        _f9b_issues = check_under_broad_attribution(working_text)
+        _f9b_widens = 0
+        for _ub in _f9b_issues:
+            _ps = _ub["para"]
+            uncovered = _ub["uncovered_files"]
+            globs = _f9b_build_globs(uncovered, _ub["stanza_files"])
+
+            if len(_ps["cops"]) == 1:
+                # Single-holder: widen the existing Files: field
+                all_globs = sorted(set(_ps["files"] + globs))
+                print(f"  Stanza '{' '.join(_ps['files'])}' declares "
+                      f"holder detected in {len(uncovered)} additional "
+                      f"file(s):")
+                print(f"    ↳ {_ub['holder_raw']}")
+                print(f"  Proposing widened stanza:\n")
+                print(f"  ┌──────────────────────────────────────")
+                if len(all_globs) <= 3:
+                    print(f"  │ Files: {all_globs[0]}")
+                    for g in all_globs[1:]:
+                        print(f"  │        {g}")
+                else:
+                    print(f"  │ Files: {all_globs[0]}")
+                    print(f"  │        {all_globs[1]}")
+                    print(f"  │        ... ({len(all_globs)} total)")
+                for i, cl in enumerate(_ps["cops"]):
+                    tag = "Copyright" if i == 0 else "          "
+                    print(f"  │ {tag}: {cl}")
+                print(f"  │ License: {_ps['license']}")
+                print(f"  └──────────────────────────────────────")
+
+                answer = ask(
+                    "  Widen this stanza? [y/N/A/X] ",
+                    batch=True).strip().lower()
+                if answer in ("y", "yes"):
+                    _orig_para = _ps["para_text"]
+                    files_str = format_files_field(all_globs)
+                    _new_para = re.sub(
+                        r'Files:[^\n]*(?:\n[ \t]+[^\n]+)*',
+                        files_str,
+                        _orig_para, count=1)
+                    _pos = working_text.find(_orig_para)
+                    if _pos >= 0:
+                        working_text = (
+                            working_text[:_pos]
+                            + _new_para
+                            + working_text[_pos + len(_orig_para):])
+                        _ps["para_text"] = _new_para
+                        _ps["files"] = all_globs
+                        _f9b_widens += 1
+                        changes_made += 1
+                        print(f"  ✓ Widened.\n")
+                    else:
+                        print(f"  ✗ Could not locate stanza.\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+            else:
+                # Multi-holder: insert a new stanza for the uncovered
+                # files with just this holder + same license
+                cop_field = format_copyright_field(
+                    merge_copyrights(
+                        [_ub["holder_raw"]],
+                        file_paths=uncovered,
+                        prefer_unicode=_unicode_pref))
+
+                print(f"  Stanza '{' '.join(_ps['files'])}' declares "
+                      f"holder detected in {len(uncovered)} additional "
+                      f"file(s) not covered by the stanza:")
+                print(f"    ↳ {_ub['holder_raw']}")
+                print(f"  Proposing additional stanza:\n")
+                print(f"  ┌──────────────────────────────────────")
+                if len(globs) <= 3:
+                    print(f"  │ Files: {globs[0]}")
+                    for g in globs[1:]:
+                        print(f"  │        {g}")
+                else:
+                    print(f"  │ Files: {globs[0]}")
+                    print(f"  │        {globs[1]}")
+                    print(f"  │        ... ({len(globs)} total)")
+                print(f"  │ Copyright: {cop_field}")
+                print(f"  │ License: {_ps['license']}")
+                print(f"  └──────────────────────────────────────")
+
+                answer = ask(
+                    "  Add this stanza? [y/N/A/X] ",
+                    batch=True).strip().lower()
+                if answer in ("y", "yes"):
+                    files_str = format_files_field(globs)
+                    new_stanza = (
+                        f"\n{files_str}\n"
+                        f"Copyright: {cop_field}\n"
+                        f"License: {_ps['license']}\n")
+                    _insert_pos = working_text.find(_ps["para_text"])
+                    if _insert_pos >= 0:
+                        _insert_pos += len(_ps["para_text"])
+                        working_text = (
+                            working_text[:_insert_pos]
+                            + "\n" + new_stanza
+                            + working_text[_insert_pos:])
+                        _f9b_widens += 1
+                        changes_made += 1
+                        print(f"  ✓ Added.\n")
+                    else:
+                        print(f"  ✗ Could not locate stanza.\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+
+        if _f9b_widens:
+            print(f"Widened/added {_f9b_widens} under-broad "
                   f"attribution(s).\n")
 
         # ── Write result ─────────────────────────────────────────────

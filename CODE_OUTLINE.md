@@ -142,7 +142,9 @@ avoid splitting names like "Rep Invariant Systems, Inc." on commas.
 |-------|----------|---------|
 | 2749–2796 | `_parse_paragraph_stanzas()` | Re-parses copyright text into structured stanza dicts |
 | 2798–2851 | `check_consolidation()` | Groups stanzas by (license, holder-set); identifies merge candidates |
-| 2853–2930 | `_simplify_file_list()` | Reduces file lists to dir/* globs; merges sibling globs with common prefixes |
+| 2854–2924 | `check_over_broad_attribution()` | Detects glob stanzas where declared holders are only found in a subset of matching files; returns list of dicts with para, holder_raw, holder_norm, detected_files, governed_files, single_holder |
+| 2926–3014 | `check_under_broad_attribution()` | Detects glob stanzas where declared holders are also detected in files NOT covered by the stanza's globs (and no other specific stanza covers those files); returns list of dicts with para, holder_raw, holder_norm, uncovered_files, stanza_files |
+| 3016–3093 | `_simplify_file_list()` | Reduces file lists to dir/* globs; merges sibling globs with common prefixes |
 
 ### Superfluous Detection (lines 2932–3012)
 
@@ -215,8 +217,10 @@ Structured pass/fail report with 19 tests.
 | 17 | 3996 | Broad glob override conflicts |
 | 18 | 4026 | Duplicate file declarations |
 | 19 | 4047 | Scanner cross-validation (2-of-3 consensus: WARN for all-disagree, INFO for consensus, PASS when all agree) |
+| 20 | 4152 | Over-broad glob attribution (WARN when holders attributed to more files than detected; VERDICT via `over_broad_ok`) |
+| 21 | 4260 | Under-broad glob attribution (WARN when holders detected in files outside their stanza; VERDICT via `under_broad_ok`) |
 
-Ends with verdict (lines 4080–4100) — four tiers: BLOCKED (license incompatibility), complete, minor issues, needs work. Detailed mismatch appendix and optional `--export` full-detail findings writer follow.
+Ends with verdict (lines 4175–4195) — four tiers: BLOCKED (license incompatibility), complete, minor issues, needs work. Detailed mismatch appendix and optional `--export` full-detail findings writer follow.
 
 ---
 
@@ -236,7 +240,9 @@ to stderr (line 4240) so the check report doesn't pollute the copyright output.
 | 6 | 4395 | Stanza coverage analysis |
 | 7 | 4480 | Files with no detected license |
 | 8 | 4505 | Copyright holder accuracy |
-| 9 | 4535 | Stanza consolidation |
+| 8b | 4745 | Over-broad glob attribution (holders attributed to more files than detected; verbose mode shows unmatched files) |
+| 8c | 4785 | Under-broad glob attribution (holders detected in files outside their stanza; verbose mode shows uncovered files) |
+| 9 | 4813 | Stanza consolidation |
 | 10 | 4556 | Decopy findings |
 | 11 | 4568 | Scanner cross-validation (all-disagree + 2-of-3 consensus subsections) |
 | 12 | 4594 | Low-confidence detections |
@@ -276,8 +282,9 @@ decopy-accelerated generate path is active.
 | 7d | 7087 | Remove orphaned standalone License blocks (no longer referenced by any Files stanza) |
 | 8 | 7123 | Replace inline license text with `/usr/share/common-licenses/` references (uses `_dep5_common_license_body()`) |
 | 0c2-final | 7200 | Late-stage FIXME resolution — 4 strategies: (1) scanner data fnmatch, (2) file header reading for SPDX-License-Identifier, (3) directory COPYRIGHT/AUTHORS files, (4) XML metadata + path-based heuristics. Runs after all other fixes to catch FIXME stanzas created by earlier steps |
-| 9 | 7443 | Split/narrow over-broad glob attribution — single-holder stanzas: narrows `Files:` globs to only the detected files; multi-holder stanzas: removes minority holders from broad stanza and creates specific stanza for their files; uses prefix-based file globbing within directories (e.g. `proto/wlr-foo*`) with collateral-match safety check; DEP-5 last-match-wins ordering |
-| — | ~7621 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
+| 9 | 7576 | Split/narrow over-broad glob attribution — single-holder stanzas: narrows `Files:` globs to only the detected files; multi-holder stanzas: removes minority holders from broad stanza and creates specific stanza for their files; uses prefix-based file globbing within directories (e.g. `proto/wlr-foo*`) with collateral-match safety check; DEP-5 last-match-wins ordering |
+| 9b | 7991 | Widen under-broad glob attribution — single-holder stanzas: widens `Files:` globs to also cover uncovered files; multi-holder stanzas: inserts a new specific stanza for the uncovered files with just the under-broad holder; uses prefix-based file globbing with collateral-match safety check |
+| — | ~8147 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
 
 After fix mode, if the decopy-accelerated generate path is active (lines
 7504–7510), stdout is restored and the hardened file is emitted to stdout
@@ -333,9 +340,9 @@ Snap Store. Key design decisions:
 - **New license mapping**: Add to `SPDX_TO_DEP5` dict (~line 751)
 - **New non-free license**: Add to `_NONFREE_RAW` set (~line 3117)
 - **New metadata enrichment**: Add a loop after the SVG/KDE/GNOME blocks (~line 1608)
-- **New review test**: Add after Test 19 in the review block (~line 4070); update verdict logic
-- **New check section**: Add after Section 12 in the check block (~line 4600); update summary
-- **New interactive fix**: Add as Fix 9 before the write-result block (~line 7120)
+- **New review test**: Add after Test 20 in the review block (~line 4168); update verdict logic
+- **New check section**: Add after Section 12 in the check block (~line 4700); update summary
+- **New interactive fix**: Add as Fix 10 before the write-result block (~line 8147)
 - **New false-positive filter**: Add to `_CODE_FRAGMENT_RE` (~line 1093) or `_NOT_A_HOLDER_RE` (~line 1128)
 - **New implausible holder pattern**: Add to `_NOT_A_HOLDER_RE` (~line 1128) or `_is_plausible_copyright()` (~line 1182)
 - **New compatibility rule**: Add to `check_license_compatibility()` (~line 1889)

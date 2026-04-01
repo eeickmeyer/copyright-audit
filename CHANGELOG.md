@@ -18,6 +18,29 @@ All notable changes to this project are documented in this file.
   `proto/wlr-foo.h` → `proto/wlr-foo*`) with a safety check to
   avoid collateral matches. Uses DEP-5 last-match-wins ordering
   (specific stanza after the broad one)
+- Check mode Test 20: over-broad glob attribution detection — reports
+  `[WARN]` when holders are attributed to more files than detected;
+  added `over_broad_ok` to the VERDICT condition
+- Review mode SECTION 8b: over-broad glob attribution — lists each
+  over-broad holder with detected vs governed file counts; verbose
+  mode shows individual unmatched files. Also added to the review
+  export and SUMMARY totals
+- Fix 9b: widen under-broad glob attribution — when a stanza declares
+  a copyright holder that was also detected in files outside the
+  stanza's globs (and no other specific stanza covers those files for
+  that holder):
+  - Single-holder stanzas: widens the `Files:` globs to also cover
+    the uncovered files
+  - Multi-holder stanzas: inserts a new specific stanza covering the
+    uncovered files with just the under-broad holder
+  Uses prefix-based file globbing with collateral-match safety check
+- Check mode Test 21: under-broad glob attribution detection — reports
+  `[WARN]` when holders are detected in files outside their stanza;
+  added `under_broad_ok` to the VERDICT condition
+- Review mode SECTION 8c: under-broad glob attribution — lists each
+  under-broad holder with covered vs uncovered file counts; verbose
+  mode shows individual uncovered files. Also added to the review
+  export and SUMMARY totals
 
 ### Fixed
 - SPDX-to-DEP-5 normalization: added `mit/x11` → `Expat` mapping so
