@@ -276,7 +276,8 @@ decopy-accelerated generate path is active.
 | 7d | 7087 | Remove orphaned standalone License blocks (no longer referenced by any Files stanza) |
 | 8 | 7123 | Replace inline license text with `/usr/share/common-licenses/` references (uses `_dep5_common_license_body()`) |
 | 0c2-final | 7200 | Late-stage FIXME resolution — 4 strategies: (1) scanner data fnmatch, (2) file header reading for SPDX-License-Identifier, (3) directory COPYRIGHT/AUTHORS files, (4) XML metadata + path-based heuristics. Runs after all other fixes to catch FIXME stanzas created by earlier steps |
-| — | ~7442 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
+| 9 | 7443 | Split over-broad glob attribution — when a `dir/*` stanza declares a copyright holder detected in only a subset of matching files, splits into a broad stanza (universal holders) and a specific stanza (universal + minority holders) for just those files; uses prefix-based file globbing within directories (e.g. `proto/wlr-foo*`) with collateral-match safety check; DEP-5 last-match-wins ordering |
+| — | ~7621 | Write result: backup `.bak` (skipped in generate pipeline via `_decopy_generated`), write changes, warn about remaining FIXME stubs |
 
 After fix mode, if the decopy-accelerated generate path is active (lines
 7504–7510), stdout is restored and the hardened file is emitted to stdout

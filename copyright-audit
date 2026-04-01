@@ -7440,6 +7440,214 @@ else:
             print(f"  Resolved {_0c2f_count} remaining Copyright:"
                   f" FIXME stanza(s).\n")
 
+        # ── Fix 9: Split over-broad glob attribution ─────────────────
+        # When a dir/* (or similar glob) stanza declares a copyright
+        # holder that was only detected in a subset of the matching
+        # files, split the stanza so the minority holder only appears
+        # in a stanza that covers the files they actually authored.
+        # DEP-5 last-match-wins: the specific stanza must come AFTER
+        # the broad one so it overrides for the relevant files.
+        _f9_para_stanzas = _parse_paragraph_stanzas(working_text)
+        _f9_splits = 0
+        for _ps in _f9_para_stanzas:
+            # Only process stanzas whose Files: field contains a glob
+            if not any("*" in f for f in _ps["files"]):
+                continue
+            if _ps["files"] == ["*"]:
+                continue
+            if len(_ps["cops"]) < 2:
+                continue  # single holder — nothing to split
+
+            # Collect all scanned files governed by this stanza's globs
+            _governed = set()
+            for r in scan_results:
+                fp = r["path"].lstrip("./")
+                if any(fnmatch.fnmatch(fp, g) for g in _ps["files"]):
+                    _governed.add(fp)
+            if len(_governed) < 2:
+                continue
+
+            # For each declared holder, find which governed files have
+            # that holder detected by the scanner
+            _holder_files = {}  # norm → set of filepaths
+            _holder_raw = {}    # norm → raw declared string
+            for cop in _ps["cops"]:
+                nc = norm_copyright(cop)
+                if not nc:
+                    continue
+                _holder_raw[nc] = cop
+                _holder_files[nc] = set()
+
+            for fp in _governed:
+                fp_set = {fp, "./" + fp}
+                for r in scan_results:
+                    rp = r["path"].lstrip("./")
+                    if rp != fp:
+                        continue
+                    for c in r.get("copyrights", []):
+                        if not c:
+                            continue
+                        nc_det = norm_copyright(c)
+                        if not nc_det:
+                            continue
+                        for nc_decl in _holder_files:
+                            if nc_det in nc_decl or nc_decl in nc_det:
+                                _holder_files[nc_decl].add(fp)
+                    break
+
+            # Identify minority holders: detected in >0 but <all files
+            _universal = set()
+            _minority = {}  # norm → set of files
+            for nc, files in _holder_files.items():
+                if len(files) >= len(_governed):
+                    _universal.add(nc)
+                elif len(files) > 0:
+                    _minority[nc] = files
+                # holders with 0 files: may be legitimately declared
+                # (upstream attribution) — leave them in the broad stanza
+
+            if not _minority:
+                continue
+
+            # Group minority holders by the exact set of files they
+            # appear in, so holders sharing the same file subset get
+            # one stanza rather than one each.
+            _subset_groups = defaultdict(list)  # frozenset(files) → [nc]
+            for nc, files in _minority.items():
+                _subset_groups[frozenset(files)].append(nc)
+
+            for _file_set, _ncs in sorted(
+                    _subset_groups.items(),
+                    key=lambda kv: sorted(kv[0])[0]):
+                subset_files = sorted(_file_set)
+                # Build the copyright lines for the new specific stanza:
+                # universal holders + minority holders for this subset
+                new_cops_raw = []
+                for nc in sorted(_universal):
+                    new_cops_raw.append(_holder_raw[nc])
+                for nc in _ncs:
+                    new_cops_raw.append(_holder_raw[nc])
+                merged_cops = merge_copyrights(
+                    new_cops_raw, file_paths=subset_files,
+                    prefer_unicode=_unicode_pref)
+                cop_field = format_copyright_field(merged_cops)
+
+                # Build globs for the specific files — prefer prefix
+                # globbing when like-named files share a directory
+                # (e.g. proto/wlr-foreign-toplevel-v1.c and .h →
+                # proto/wlr-foreign-toplevel-v1*)
+                _f9_dirs = defaultdict(list)
+                for _fp in subset_files:
+                    _f9_dirs[str(Path(_fp).parent)].append(_fp)
+                _f9_globs = []
+                for _d9, _d9files in sorted(_f9_dirs.items()):
+                    if _d9 == "." or len(_d9files) < 2:
+                        _f9_globs.extend(sorted(_d9files))
+                        continue
+                    # Find common prefix of basenames in this directory
+                    basenames = [os.path.basename(f) for f in _d9files]
+                    cpfx = os.path.commonprefix(basenames)
+                    # Prefix must be meaningful (>3 chars, not just ".")
+                    if len(cpfx) > 3:
+                        # Verify the glob wouldn't accidentally match
+                        # files outside the subset (in _governed but not
+                        # in our subset)
+                        _proposed = (_d9 + "/" + cpfx + "*"
+                                     if _d9 != "." else cpfx + "*")
+                        _collateral = [
+                            f for f in _governed - _file_set
+                            if fnmatch.fnmatch(f, _proposed)]
+                        if not _collateral:
+                            _f9_globs.append(_proposed)
+                        else:
+                            _f9_globs.extend(sorted(_d9files))
+                    else:
+                        _f9_globs.extend(sorted(_d9files))
+                globs = sorted(_f9_globs)
+
+                print(f"  Stanza '{' '.join(_ps['files'])}' attributes "
+                      f"holder(s) to all files, but scanner detected "
+                      f"them in only {len(subset_files)}/"
+                      f"{len(_governed)} files.")
+                for nc in _ncs:
+                    print(f"    ↳ {_holder_raw[nc]}")
+                print(f"  Proposing specific stanza for those files:\n")
+                print(f"  ┌──────────────────────────────────────")
+                if len(globs) <= 3:
+                    print(f"  │ Files: {globs[0]}")
+                    for g in globs[1:]:
+                        print(f"  │        {g}")
+                else:
+                    print(f"  │ Files: {globs[0]}")
+                    print(f"  │        {globs[1]}")
+                    print(f"  │        ... ({len(globs)} total)")
+                for i, cl in enumerate(merged_cops):
+                    tag = "Copyright" if i == 0 else "          "
+                    print(f"  │ {tag}: {cl}")
+                print(f"  │ License: {_ps['license']}")
+                print(f"  └──────────────────────────────────────")
+
+                answer = ask(
+                    "  Split this holder into a specific stanza? "
+                    "[y/N/A/X] ", batch=True).strip().lower()
+                if answer in ("y", "yes"):
+                    # 1) Remove minority holders from the broad stanza
+                    _orig_para = _ps["para_text"]
+                    _broad_cops = [
+                        c for c in _ps["cops"]
+                        if norm_copyright(c) not in set(_ncs)]
+                    if _broad_cops:
+                        _broad_cop_field = format_copyright_field(
+                            merge_copyrights(
+                                _broad_cops,
+                                prefer_unicode=_unicode_pref))
+                        _new_para = re.sub(
+                            r'Copyright:[^\n]*(?:\n[ \t]+[^\n]+)*',
+                            'Copyright: ' + _broad_cop_field,
+                            _orig_para, count=1)
+                    else:
+                        _new_para = _orig_para
+
+                    # Replace original paragraph → trimmed paragraph
+                    _pos = working_text.find(_orig_para)
+                    if _pos >= 0:
+                        working_text = (
+                            working_text[:_pos]
+                            + _new_para
+                            + working_text[_pos + len(_orig_para):])
+                        # Update para_text so subsequent iterations
+                        # can still match
+                        _ps["para_text"] = _new_para
+                        # Also update cops list
+                        _ps["cops"] = _broad_cops
+
+                    # 2) Insert the specific stanza AFTER the broad one
+                    #    (DEP-5 last-match-wins)
+                    files_str = format_files_field(globs)
+                    specific_stanza = (
+                        f"\n{files_str}\n"
+                        f"Copyright: {cop_field}\n"
+                        f"License: {_ps['license']}\n")
+                    # Insert right after the broad stanza's paragraph
+                    _insert_pos = working_text.find(
+                        _ps["para_text"])
+                    if _insert_pos >= 0:
+                        _insert_pos += len(_ps["para_text"])
+                        working_text = (
+                            working_text[:_insert_pos]
+                            + "\n" + specific_stanza
+                            + working_text[_insert_pos:])
+
+                    _f9_splits += 1
+                    changes_made += 1
+                    print(f"  ✓ Split.\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+
+        if _f9_splits:
+            print(f"Split {_f9_splits} over-broad holder "
+                  f"attribution(s) into specific stanzas.\n")
+
         # ── Write result ─────────────────────────────────────────────
         if changes_made > 0:
             # Deduplicate standalone License: blocks (keep first occurrence)
