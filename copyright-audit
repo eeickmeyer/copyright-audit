@@ -7443,10 +7443,45 @@ else:
         # ── Fix 9: Split over-broad glob attribution ─────────────────
         # When a dir/* (or similar glob) stanza declares a copyright
         # holder that was only detected in a subset of the matching
-        # files, split the stanza so the minority holder only appears
-        # in a stanza that covers the files they actually authored.
-        # DEP-5 last-match-wins: the specific stanza must come AFTER
-        # the broad one so it overrides for the relevant files.
+        # files, narrow the stanza so the holder only covers files
+        # they actually authored.
+        #
+        # Single-holder stanzas: replace the broad globs with specific
+        # patterns matching only the detected files (or remove the
+        # stanza if the holder isn't detected in any matching files).
+        #
+        # Multi-holder stanzas: remove minority holders from the broad
+        # stanza and create a new specific stanza for their files.
+        # DEP-5 last-match-wins: the specific stanza comes AFTER the
+        # broad one so it overrides for the relevant files.
+
+        def _f9_build_globs(subset_files, governed_set):
+            """Build prefix-based globs for a file subset within a
+            governed set, falling back to individual paths."""
+            _dirs = defaultdict(list)
+            for _fp in subset_files:
+                _dirs[str(Path(_fp).parent)].append(_fp)
+            _globs = []
+            for _d, _dfiles in sorted(_dirs.items()):
+                if _d == "." or len(_dfiles) < 2:
+                    _globs.extend(sorted(_dfiles))
+                    continue
+                basenames = [os.path.basename(f) for f in _dfiles]
+                cpfx = os.path.commonprefix(basenames)
+                if len(cpfx) > 3:
+                    _proposed = (_d + "/" + cpfx + "*"
+                                 if _d != "." else cpfx + "*")
+                    _collateral = [
+                        f for f in governed_set - set(subset_files)
+                        if fnmatch.fnmatch(f, _proposed)]
+                    if not _collateral:
+                        _globs.append(_proposed)
+                    else:
+                        _globs.extend(sorted(_dfiles))
+                else:
+                    _globs.extend(sorted(_dfiles))
+            return sorted(_globs)
+
         _f9_para_stanzas = _parse_paragraph_stanzas(working_text)
         _f9_splits = 0
         for _ps in _f9_para_stanzas:
@@ -7455,8 +7490,6 @@ else:
                 continue
             if _ps["files"] == ["*"]:
                 continue
-            if len(_ps["cops"]) < 2:
-                continue  # single holder — nothing to split
 
             # Collect all scanned files governed by this stanza's globs
             _governed = set()
@@ -7479,7 +7512,6 @@ else:
                 _holder_files[nc] = set()
 
             for fp in _governed:
-                fp_set = {fp, "./" + fp}
                 for r in scan_results:
                     rp = r["path"].lstrip("./")
                     if rp != fp:
@@ -7495,7 +7527,7 @@ else:
                                 _holder_files[nc_decl].add(fp)
                     break
 
-            # Identify minority holders: detected in >0 but <all files
+            # Classify holders as universal (all files) or minority
             _universal = set()
             _minority = {}  # norm → set of files
             for nc, files in _holder_files.items():
@@ -7503,12 +7535,72 @@ else:
                     _universal.add(nc)
                 elif len(files) > 0:
                     _minority[nc] = files
-                # holders with 0 files: may be legitimately declared
-                # (upstream attribution) — leave them in the broad stanza
+                # holders with 0 detected files: scanner may not embed
+                # headers in every file — leave as-is (no evidence to
+                # narrow)
 
             if not _minority:
                 continue
 
+            # ── Single-holder stanza: narrow the globs ───────────────
+            if len(_ps["cops"]) == 1:
+                nc = list(_holder_files.keys())[0]
+                detected_files = _holder_files.get(nc, set())
+                if not detected_files:
+                    continue
+                if len(detected_files) >= len(_governed):
+                    continue  # holder is in all files — no narrowing
+                subset_files = sorted(detected_files)
+                globs = _f9_build_globs(subset_files, _governed)
+
+                print(f"  Stanza '{' '.join(_ps['files'])}' attributes "
+                      f"holder to {len(_governed)} files, but scanner "
+                      f"detected them in only {len(subset_files)}:")
+                print(f"    ↳ {_ps['cops'][0]}")
+                print(f"  Proposing narrowed stanza:\n")
+                print(f"  ┌──────────────────────────────────────")
+                if len(globs) <= 3:
+                    print(f"  │ Files: {globs[0]}")
+                    for g in globs[1:]:
+                        print(f"  │        {g}")
+                else:
+                    print(f"  │ Files: {globs[0]}")
+                    print(f"  │        {globs[1]}")
+                    print(f"  │        ... ({len(globs)} total)")
+                for i, cl in enumerate(_ps["cops"]):
+                    tag = "Copyright" if i == 0 else "          "
+                    print(f"  │ {tag}: {cl}")
+                print(f"  │ License: {_ps['license']}")
+                print(f"  └──────────────────────────────────────")
+
+                answer = ask(
+                    "  Narrow this stanza? [y/N/A/X] ",
+                    batch=True).strip().lower()
+                if answer in ("y", "yes"):
+                    _orig_para = _ps["para_text"]
+                    # Replace the Files: field with narrowed globs
+                    files_str = format_files_field(globs)
+                    _new_para = re.sub(
+                        r'Files:[^\n]*(?:\n[ \t]+[^\n]+)*',
+                        files_str,
+                        _orig_para, count=1)
+                    _pos = working_text.find(_orig_para)
+                    if _pos >= 0:
+                        working_text = (
+                            working_text[:_pos]
+                            + _new_para
+                            + working_text[_pos + len(_orig_para):])
+                        _ps["para_text"] = _new_para
+                        _f9_splits += 1
+                        changes_made += 1
+                        print(f"  ✓ Narrowed.\n")
+                    else:
+                        print(f"  ✗ Could not locate stanza.\n")
+                else:
+                    print(f"  ✗ Skipped.\n")
+                continue
+
+            # ── Multi-holder stanza: split minority into specific ─────
             # Group minority holders by the exact set of files they
             # appear in, so holders sharing the same file subset get
             # one stanza rather than one each.
@@ -7532,38 +7624,7 @@ else:
                     prefer_unicode=_unicode_pref)
                 cop_field = format_copyright_field(merged_cops)
 
-                # Build globs for the specific files — prefer prefix
-                # globbing when like-named files share a directory
-                # (e.g. proto/wlr-foreign-toplevel-v1.c and .h →
-                # proto/wlr-foreign-toplevel-v1*)
-                _f9_dirs = defaultdict(list)
-                for _fp in subset_files:
-                    _f9_dirs[str(Path(_fp).parent)].append(_fp)
-                _f9_globs = []
-                for _d9, _d9files in sorted(_f9_dirs.items()):
-                    if _d9 == "." or len(_d9files) < 2:
-                        _f9_globs.extend(sorted(_d9files))
-                        continue
-                    # Find common prefix of basenames in this directory
-                    basenames = [os.path.basename(f) for f in _d9files]
-                    cpfx = os.path.commonprefix(basenames)
-                    # Prefix must be meaningful (>3 chars, not just ".")
-                    if len(cpfx) > 3:
-                        # Verify the glob wouldn't accidentally match
-                        # files outside the subset (in _governed but not
-                        # in our subset)
-                        _proposed = (_d9 + "/" + cpfx + "*"
-                                     if _d9 != "." else cpfx + "*")
-                        _collateral = [
-                            f for f in _governed - _file_set
-                            if fnmatch.fnmatch(f, _proposed)]
-                        if not _collateral:
-                            _f9_globs.append(_proposed)
-                        else:
-                            _f9_globs.extend(sorted(_d9files))
-                    else:
-                        _f9_globs.extend(sorted(_d9files))
-                globs = sorted(_f9_globs)
+                globs = _f9_build_globs(subset_files, _governed)
 
                 print(f"  Stanza '{' '.join(_ps['files'])}' attributes "
                       f"holder(s) to all files, but scanner detected "
@@ -7615,10 +7676,7 @@ else:
                             working_text[:_pos]
                             + _new_para
                             + working_text[_pos + len(_orig_para):])
-                        # Update para_text so subsequent iterations
-                        # can still match
                         _ps["para_text"] = _new_para
-                        # Also update cops list
                         _ps["cops"] = _broad_cops
 
                     # 2) Insert the specific stanza AFTER the broad one
@@ -7628,7 +7686,6 @@ else:
                         f"\n{files_str}\n"
                         f"Copyright: {cop_field}\n"
                         f"License: {_ps['license']}\n")
-                    # Insert right after the broad stanza's paragraph
                     _insert_pos = working_text.find(
                         _ps["para_text"])
                     if _insert_pos >= 0:
@@ -7645,8 +7702,8 @@ else:
                     print(f"  ✗ Skipped.\n")
 
         if _f9_splits:
-            print(f"Split {_f9_splits} over-broad holder "
-                  f"attribution(s) into specific stanzas.\n")
+            print(f"Split/narrowed {_f9_splits} over-broad "
+                  f"attribution(s).\n")
 
         # ── Write result ─────────────────────────────────────────────
         if changes_made > 0:

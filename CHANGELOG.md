@@ -5,17 +5,19 @@ All notable changes to this project are documented in this file.
 ## 2026-04-01
 
 ### Added
-- Fix 9: split over-broad glob attribution — when a `dir/*` stanza
-  declares a copyright holder that was only detected in a subset of
-  the matching files, proposes splitting into a broad stanza (without
-  the minority holder) and a specific stanza covering only the files
-  where that holder was actually detected. Groups minority holders by
-  file subset so holders sharing the same files get a single stanza.
-  Uses prefix-based file globbing when like-named files share a
-  directory (e.g. `proto/wlr-foo.c` + `proto/wlr-foo.h` →
-  `proto/wlr-foo*`) with a safety check to avoid collateral matches.
-  Uses DEP-5 last-match-wins ordering (specific stanza after the
-  broad one)
+- Fix 9: split/narrow over-broad glob attribution — when a `dir/*`
+  stanza declares a copyright holder that was only detected in a
+  subset of the matching files:
+  - Single-holder stanzas: narrows the `Files:` globs to match only
+    the files where the holder was actually detected
+  - Multi-holder stanzas: removes minority holders from the broad
+    stanza and creates a specific stanza for their files
+  Groups minority holders by file subset so holders sharing the same
+  files get a single stanza. Uses prefix-based file globbing when
+  like-named files share a directory (e.g. `proto/wlr-foo.c` +
+  `proto/wlr-foo.h` → `proto/wlr-foo*`) with a safety check to
+  avoid collateral matches. Uses DEP-5 last-match-wins ordering
+  (specific stanza after the broad one)
 
 ### Fixed
 - SPDX-to-DEP-5 normalization: added `mit/x11` → `Expat` mapping so
