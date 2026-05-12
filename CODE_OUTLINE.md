@@ -1,6 +1,6 @@
 # Code Outline
 
-`copyright-audit` is a single-file hybrid Bash + Python script (7 512 lines).
+`copyright-audit` is a single-file hybrid Bash + Python script (8 315 lines).
 The Bash wrapper handles argument parsing, scanner invocation, and environment
 setup; the embedded Python (via heredoc) does all analysis, reporting, and
 interactive fixing.
@@ -23,7 +23,7 @@ interactive fixing.
 
 ---
 
-## Embedded Python (lines 362–7 510)
+## Embedded Python (lines 362–8 313)
 
 ### Initialization & Configuration (lines 362–748)
 
@@ -100,24 +100,24 @@ Overrides scanner heuristics with authoritative embedded metadata.
 | 1697–1731 | Stanza parser | Populates `stanzas` (glob→license) and `stanza_copyrights` (glob→holders) |
 | 1734–1755 | License block parser | Populates `license_blocks` (name→body text) for standalone License paragraphs |
 
-### Validation Functions (lines 1761–2210)
+### Validation Functions (lines 1769–2217)
 
 These are pure functions called by both check and review modes.
 
 | Lines | Function | Purpose |
 |-------|----------|---------|
-| 1761–1851 | `check_license_completeness()` | `SYSTEM_COMMON_LICENSES` setup (line 1761); tries host `/usr/share/common-licenses/` then `$SNAP/usr/share/common-licenses/` as fallback; verifies each referenced license has a text block; checks CC full-text, FIXME stubs, common-licenses refs |
-| 1851–1887 | `check_coverage()` | Finds files uncovered by any stanza; finds stale globs matching no file |
-| 1889–1981 | `check_license_compatibility()` | Detects known conflicts: Apache+GPL-2, GPL-2-only+GPL-3-only, CDDL+GPL, EPL+GPL, etc. |
-| 1983–2143 | `check_dep5_format()` | Structural DEP-5 validation: Format header, field ordering, tabs, trailing whitespace, blank continuation lines, duplicate globs, catch-all stanza, etc. Returns `(line, severity, message, fix_tag)` tuples |
-| 2145–2210 | `fix_dep5_format()` | Auto-applies DEP-5 format fixes (trailing whitespace, tabs, blank continuations, missing newline) |
+| 1783–1857 | `check_license_completeness()` | `SYSTEM_COMMON_LICENSES` setup (line 1769); tries host `/usr/share/common-licenses/` then `$SNAP/usr/share/common-licenses/` as fallback; verifies each referenced license has a text block; checks CC full-text, FIXME stubs, common-licenses refs |
+| 1859–1895 | `check_coverage()` | Finds files uncovered by any stanza; finds stale globs matching no file |
+| 1897–1989 | `check_license_compatibility()` | Detects known conflicts: Apache+GPL-2, GPL-2-only+GPL-3-only, CDDL+GPL, EPL+GPL, etc. |
+| 1991–2151 | `check_dep5_format()` | Structural DEP-5 validation: Format header, field ordering, tabs, trailing whitespace, blank continuation lines, duplicate globs, catch-all stanza, etc. Returns `(line, severity, message, fix_tag)` tuples |
+| 2153–2217 | `fix_dep5_format()` | Auto-applies DEP-5 format fixes (trailing whitespace, tabs, blank continuations, missing newline) |
 
-> **Note on `SYSTEM_COMMON_LICENSES`** (line 1761): populated at import time
+> **Note on `SYSTEM_COMMON_LICENSES`** (line 1769): populated at import time
 > from `/usr/share/common-licenses/` and used by both completeness and fix logic.
 
-### Copyright Comparison Utilities (lines 2211–2640)
+### Copyright Comparison Utilities (lines 2219–2662)
 
-Includes corporate-suffix awareness (line 2232, `_CORP_SUFFIXES_RE`) to
+Includes corporate-suffix awareness (line 2240, `_CORP_SUFFIXES_RE`) to
 avoid splitting names like "Rep Invariant Systems, Inc." on commas.
 
 | Lines | Function | Purpose |
@@ -130,40 +130,40 @@ avoid splitting names like "Rep Invariant Systems, Inc." on commas.
 | 2434–2600 | `merge_copyrights()` | Core deduplication engine: groups years by normalized author, email-based dedup, compressed-key dedup, fuzzy edit-distance dedup, Unicode preference, year-range collapsing |
 | 2601–2640 | Formatting helpers | `format_files_field()`, `_copyright_continuations()`, `format_copyright_field()` |
 
-### Copyright Holder Audit (lines 2656–2747)
+### Copyright Holder Audit (lines 2664–2755)
 
 | Lines | Function | Purpose |
 |-------|----------|---------|
-| 2656–2747 | `check_copyright_holders()` | Compares detected vs. declared holders per stanza; skips license text files (LICENSE, COPYING) to avoid false positives; returns missing, extra, and per-file attribution maps |
+| 2664–2755 | `check_copyright_holders()` | Compares detected vs. declared holders per stanza; skips license text files (LICENSE, COPYING) to avoid false positives; returns missing, extra, and per-file attribution maps |
 
-### Stanza Consolidation (lines 2749–2930)
+### Stanza Consolidation (lines 2757–3132)
 
 | Lines | Function | Purpose |
 |-------|----------|---------|
-| 2749–2796 | `_parse_paragraph_stanzas()` | Re-parses copyright text into structured stanza dicts |
-| 2798–2851 | `check_consolidation()` | Groups stanzas by (license, holder-set); identifies merge candidates |
-| 2854–2924 | `check_over_broad_attribution()` | Detects glob stanzas where declared holders are only found in a subset of matching files; returns list of dicts with para, holder_raw, holder_norm, detected_files, governed_files, single_holder |
-| 2926–3014 | `check_under_broad_attribution()` | Detects glob stanzas where declared holders are also detected in files NOT covered by the stanza's globs (and no other specific stanza covers those files); returns list of dicts with para, holder_raw, holder_norm, uncovered_files, stanza_files |
-| 3016–3113 | `_simplify_file_list()` | Reduces file lists to dir/* globs; tries extension-based wildcards (dir/*.ext) when dir/* is unsafe; merges sibling globs with common prefixes. Accepts optional `all_files` set for collateral-checking extension globs |
+| 2757–2804 | `_parse_paragraph_stanzas()` | Re-parses copyright text into structured stanza dicts |
+| 2806–2859 | `check_consolidation()` | Groups stanzas by (license, holder-set); identifies merge candidates |
+| 2861–2931 | `check_over_broad_attribution()` | Detects glob stanzas where declared holders are only found in a subset of matching files; returns list of dicts with para, holder_raw, holder_norm, detected_files, governed_files, single_holder |
+| 2933–3021 | `check_under_broad_attribution()` | Detects glob stanzas where declared holders are also detected in files NOT covered by the stanza's globs (and no other specific stanza covers those files); returns list of dicts with para, holder_raw, holder_norm, uncovered_files, stanza_files |
+| 3023–3132 | `_simplify_file_list()` | Reduces file lists to dir/* globs; tries extension-based wildcards (dir/*.ext) when dir/* is unsafe; merges sibling globs with common prefixes. Accepts optional `all_files` set for collateral-checking extension globs |
 
-### Superfluous Detection (lines 2932–3012)
+### Superfluous Detection (lines 3134–3214)
 
 | Lines | Function | Purpose |
 |-------|----------|--------|
-| 2932–3012 | `check_superfluous()` | Identifies superfluous stanzas/patterns: (1) all patterns stale → remove stanza, (2) some patterns stale → remove stale only, (3) stanza redundant with catch-all (bidirectional `licenses_compatible()` + copyright-holder subset check) → remove stanza. Returns list of dicts with `stanza`, `reason`, `stale_patterns`, `kept_patterns`, `remove_entirely` |
+| 3134–3214 | `check_superfluous()` | Identifies superfluous stanzas/patterns: (1) all patterns stale → remove stanza, (2) some patterns stale → remove stale only, (3) stanza redundant with catch-all (bidirectional `licenses_compatible()` + copyright-holder subset check) → remove stanza. Returns list of dicts with `stanza`, `reason`, `stale_patterns`, `kept_patterns`, `remove_entirely` |
 
-### False-Positive Classification & Compatibility (lines 3014–3168)
+### False-Positive Classification & Compatibility (lines 3216–3370)
 
 | Lines | Function | Purpose |
 |-------|----------|---------|
-| 3014–3029 | `classify_fp()` | Classifies likely false-positive mismatches (autoconf boilerplate, LICENSE text files, build files, metadata) |
-| 3031–3115 | `licenses_compatible()` | Full GPL/LGPL/AGPL/GFDL family subsumption, BSD/MIT aliases, LGPL→GPL conversion, MPL-2.0 exception |
-| 3117–3140 | `_NONFREE_RAW` / `NONFREE` / `is_nonfree()` | Non-free/non-DFSG license detection (SSPL, BUSL, CC-NC, CC-ND, etc.) |
-| 3151–3168 | `_warn_stubs()` | Post-write warning for unresolved FIXME/TODO/PLACEHOLDER tokens |
+| 3216–3231 | `classify_fp()` | Classifies likely false-positive mismatches (autoconf boilerplate, LICENSE text files, build files, metadata) |
+| 3233–3317 | `licenses_compatible()` | Full GPL/LGPL/AGPL/GFDL family subsumption, BSD/MIT aliases, LGPL→GPL conversion, MPL-2.0 exception |
+| 3319–3351 | `_NONFREE_RAW` / `NONFREE` / `is_nonfree()` | Non-free/non-DFSG license detection (SSPL, BUSL, CC-NC, CC-ND, etc.) |
+| 3353–3370 | `_warn_stubs()` | Post-write warning for unresolved FIXME/TODO/PLACEHOLDER tokens |
 
 ---
 
-## Mode: generate (lines 3170–3540)
+## Mode: generate (lines 3372–3742)
 
 Builds a new `debian/copyright` from scan results. **When `decopy` is
 installed**, the Bash wrapper runs `decopy .` first to seed the file (lines
@@ -172,62 +172,62 @@ is the fallback when decopy is absent.
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 3170–3217 | File grouping | Collects per-file data; counts licenses to pick catch-all; groups by (license, author-set) |
-| 3218–3270 | `smart_glob()` | Directory-aware glob generation with sibling merging |
-| 3272–3363 | Catch-all + per-author stanzas | Emits `Files: *` then per-author stanzas |
-| 3363–3420 | `debian/*` stanza proposal | Interactive prompt for packaging stanza (skipped for native packages) |
-| 3422–3487 | License text blocks | Common-licenses references, SPDX/CC fetching, FIXME stubs for unfetched |
-| 3491–3540 | Warnings & summary | Non-free detection, loud compatibility banner, file/stanza counts |
+| 3372–3419 | File grouping | Collects per-file data; counts licenses to pick catch-all; groups by (license, author-set) |
+| 3420–3472 | `smart_glob()` | Directory-aware glob generation with sibling merging |
+| 3474–3565 | Catch-all + per-author stanzas | Emits `Files: *` then per-author stanzas |
+| 3565–3622 | `debian/*` stanza proposal | Interactive prompt for packaging stanza (skipped for native packages) |
+| 3624–3689 | License text blocks | Common-licenses references, SPDX/CC fetching, FIXME stubs for unfetched |
+| 3693–3742 | Warnings & summary | Non-free detection, loud compatibility banner, file/stanza counts |
 
 ---
 
-## Mode: check / review — Setup (lines 3545–3738)
+## Mode: check / review — Setup (lines 3747–3940)
 
 | Lines | Section | Purpose |
 |-------|---------|---------|
-| 3545–3593 | Load auxiliary results | `_parse_dep5_sanity()` parses DEP-5 output from each available secondary scanner into `all_sanity_results` dict |
-| 3595–3645 | `run_sanity_check()` | Cross-validates primary vs. one secondary scanner by license family; both sides DEP-5-normalized via `to_dep5()`; skips project-level metadata files (LICENSE, COPYING, AUTHORS, CONTRIBUTORS); called once per secondary tool, results stored in `all_sanity_discrepancies` |
-| 3647–3698 | Two-of-three consensus | When ≥2 secondary scanners ran, gathers all flagged paths, compares license families pairwise across tools; files where ≥2 agree → `sanity_consensus` (INFO); files where all disagree → `sanity_real_disc` (WARN) |
-| 3700–3738 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
+| 3747–3795 | Load auxiliary results | `_parse_dep5_sanity()` parses DEP-5 output from each available secondary scanner into `all_sanity_results` dict |
+| 3797–3847 | `run_sanity_check()` | Cross-validates primary vs. one secondary scanner by license family; both sides DEP-5-normalized via `to_dep5()`; skips project-level metadata files (LICENSE, COPYING, AUTHORS, CONTRIBUTORS); called once per secondary tool, results stored in `all_sanity_discrepancies` |
+| 3849–3900 | Two-of-three consensus | When ≥2 secondary scanners ran, gathers all flagged paths, compares license families pairwise across tools; files where ≥2 agree → `sanity_consensus` (INFO); files where all disagree → `sanity_real_disc` (WARN) |
+| 3902–3940 | Classification loop | Iterates scan results; populates `real_mismatches`, `fp_mismatches`, `no_license`, `apache_files`, `all_scan_licenses` |
 
 ---
 
-## Mode: review (lines 3740–4230)
+## Mode: review (lines 3942–4432)
 
 Structured pass/fail report with 19 tests.
 
 | Test | Lines | What it checks |
 |------|-------|----------------|
-| 1 | 3751 | DEP-5 format validation |
-| 2 | 3769 | Catch-all `Files: *` stanza |
-| 3 | 3774 | License mismatches (with inline details: detected vs. declared, affected files) |
-| 4 | 3786 | Undeclared licenses |
-| 5 | 3803 | License compatibility (loud `!`-banner on failure; BLOCKED verdict) |
-| 6 | 3819 | Non-free licenses in source |
-| 7 | 3829 | Source files without license headers |
-| 8 | 3834 | License text completeness |
-| 9 | 3849 | Stanza coverage (uncovered files) |
-| 10 | 3865 | Stale stanza globs |
-| 10b | 3874 | Superfluous stanzas/patterns (entirely removable + stale-pattern stanzas; VERDICT via `superfluous_ok`) |
-| 11 | 3904 | Copyright holder accuracy (undeclared = WARN; declared-not-detected = INFO) |
-| 13 | 3933 | Low-confidence detections |
-| 14 | 3942 | Stanza consolidation opportunities |
-| 15 | 3959 | FIXME entries in copyright file |
-| 16 | 3980 | Versionless / invalid license identifiers |
-| 17 | 3996 | Broad glob override conflicts |
-| 18 | 4026 | Duplicate file declarations |
-| 19 | 4047 | Scanner cross-validation (2-of-3 consensus: WARN for all-disagree, INFO for consensus, PASS when all agree) |
-| 20 | 4152 | Over-broad glob attribution (WARN when holders attributed to more files than detected; VERDICT via `over_broad_ok`) |
-| 21 | 4260 | Under-broad glob attribution (WARN when holders detected in files outside their stanza; VERDICT via `under_broad_ok`) |
+| 1 | 3953 | DEP-5 format validation |
+| 2 | 3971 | Catch-all `Files: *` stanza |
+| 3 | 3976 | License mismatches (with inline details: detected vs. declared, affected files) |
+| 4 | 3988 | Undeclared licenses |
+| 5 | 4005 | License compatibility (loud `!`-banner on failure; BLOCKED verdict) |
+| 6 | 4021 | Non-free licenses in source |
+| 7 | 4031 | Source files without license headers |
+| 8 | 4036 | License text completeness |
+| 9 | 4051 | Stanza coverage (uncovered files) |
+| 10 | 4067 | Stale stanza globs |
+| 10b | 4076 | Superfluous stanzas/patterns (entirely removable + stale-pattern stanzas; VERDICT via `superfluous_ok`) |
+| 11 | 4106 | Copyright holder accuracy (undeclared = WARN; declared-not-detected = INFO) |
+| 13 | 4135 | Low-confidence detections |
+| 14 | 4144 | Stanza consolidation opportunities |
+| 15 | 4161 | FIXME entries in copyright file |
+| 16 | 4182 | Versionless / invalid license identifiers |
+| 17 | 4198 | Broad glob override conflicts |
+| 18 | 4228 | Duplicate file declarations |
+| 19 | 4249 | Scanner cross-validation (2-of-3 consensus: WARN for all-disagree, INFO for consensus, PASS when all agree) |
+| 20 | 4354 | Over-broad glob attribution (WARN when holders attributed to more files than detected; VERDICT via `over_broad_ok`) |
+| 21 | 4462 | Under-broad glob attribution (WARN when holders detected in files outside their stanza; VERDICT via `under_broad_ok`) |
 
-Ends with verdict (lines 4175–4195) — four tiers: BLOCKED (license incompatibility), complete, minor issues, needs work. Detailed mismatch appendix and optional `--export` full-detail findings writer follow.
+Ends with verdict (lines 4377–4397) — four tiers: BLOCKED (license incompatibility), complete, minor issues, needs work. Detailed mismatch appendix and optional `--export` full-detail findings writer follow.
 
 ---
 
-## Mode: check — Standard Report (lines 4233–4660)
+## Mode: check — Standard Report (lines 4435–4862)
 
 When entered via the decopy-accelerated generate path, stdout is redirected
-to stderr (line 4240) so the check report doesn't pollute the copyright output.
+to stderr (line 4442) so the check report doesn't pollute the copyright output.
 
 | Section | Lines | Content |
 |---------|-------|---------|

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-05-12
+
+### Fixed
+- License compatibility false positive: `GPL-2.0 WITH Linux-syscall-note`
+  is no longer treated as incompatible with later GPL licenses. The
+  compatibility normalization now treats this exception-bearing GPL-2.0
+  form as compatible with GPL-3 family declarations.
+
 ## 2026-04-01
 
 ### Added

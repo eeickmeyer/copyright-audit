@@ -901,8 +901,15 @@ SOURCE_EXTS = {
 def norm_cmp(lic):
     """Normalize for comparison only (lowercase, collapse variants)."""
     s = lic.lower().strip()
+    has_linux_syscall_note = "linux-syscall-note" in s
+    # Exceptions are not standalone licenses; compare by the base license.
+    s = re.split(r'\s+with\s+', s, maxsplit=1, flags=re.IGNORECASE)[0]
     s = re.sub(r'\.0(?=$|[^0-9.])', '', s)
     s = s.replace("-or-later", "+").replace("-only", "")
+    # GPL-2.0 WITH Linux-syscall-note is compatible with later GPL versions.
+    # Normalize to GPL-2+ for compatibility checks to avoid false positives.
+    if has_linux_syscall_note and s.startswith("gpl-2"):
+        return "gpl-2+"
     ALIASES = {
         "expat": "expat", "mit": "expat", "x11": "expat",
         "mit/x11": "expat",
